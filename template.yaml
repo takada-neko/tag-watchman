@@ -136,6 +136,190 @@ Resources:
                   - cloudtrail:GetTrailStatus
                   - cloudtrail:DescribeTrails
                 Resource: "*"
+              # ECR
+              - Effect: Allow
+                Action:
+                  - ecr:DescribeRepositories
+                  - ecr:GetRepositoryPolicy
+                  - ecr:SetRepositoryPolicy
+                  - ecr:DeleteRepositoryPolicy
+                  - ecr:TagResource
+                  - ecr:UntagResource
+                  - ecr:ListTagsForResource
+                  - ecr:DeleteRepository
+                Resource: "*"
+              # Redshift
+              - Effect: Allow
+                Action:
+                  - redshift:DescribeClusters
+                  - redshift:DescribeTags
+                  - redshift:CreateTags
+                  - redshift:DeleteTags
+                  - redshift:ModifyCluster
+                  - redshift:DeleteCluster
+                Resource: "*"
+              # Step Functions
+              - Effect: Allow
+                Action:
+                  - states:DescribeStateMachine
+                  - states:ListTagsForResource
+                  - states:TagResource
+                  - states:UntagResource
+                  - states:SetResourcePolicy
+                  - states:DeleteResourcePolicy
+                  - states:DeleteStateMachine
+                Resource: "*"
+              # Workspaces
+              - Effect: Allow
+                Action:
+                  - workspaces:DescribeWorkspaces
+                  - workspaces:DescribeWorkspaceDirectories
+                  - workspaces:CreateTags
+                  - workspaces:DeleteTags
+                  - workspaces:TerminateWorkspaces
+                Resource: "*"
+              # IGW / NAT Gateway / VPC Peering
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInternetGateways
+                  - ec2:DetachInternetGateway
+                  - ec2:DeleteInternetGateway
+                  - ec2:DescribeNatGateways
+                  - ec2:DeleteNatGateway
+                  - ec2:DescribeVpcPeeringConnections
+                  - ec2:DeleteVpcPeeringConnection
+                  - ec2:DescribeInstances
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                Resource: "*"
+              # IAM Role / User
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:ListInstanceProfilesForRole
+                  - iam:DetachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:DeleteRole
+                  - iam:GetUser
+                  - iam:ListAttachedUserPolicies
+                  - iam:ListUserPolicies
+                  - iam:ListAccessKeys
+                  - iam:ListMFADevices
+                  - iam:ListGroupsForUser
+                  - iam:DetachUserPolicy
+                  - iam:DeleteUserPolicy
+                  - iam:UpdateAccessKey
+                  - iam:DeleteAccessKey
+                  - iam:DeactivateMFADevice
+                  - iam:DeleteVirtualMFADevice
+                  - iam:RemoveUserFromGroup
+                  - iam:TagUser
+                  - iam:UntagUser
+                  - iam:DeleteUser
+                Resource: "*"
+              # API Gateway
+              - Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:DELETE
+                  - apigateway:PATCH
+                  - apigateway:PUT
+                Resource: "*"
+              # ECS（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:ListTagsForResource
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                Resource: "*"
+              # EKS（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                  - eks:UpdateClusterConfig
+                  - eks:ListTagsForResource
+                  - eks:TagResource
+                  - eks:UntagResource
+                Resource: "*"
+              # ElastiCache（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - elasticache:DescribeReplicationGroups
+                  - elasticache:DescribeCacheClusters
+                  - elasticache:ModifyReplicationGroup
+                  - elasticache:AddTagsToResource
+                  - elasticache:RemoveTagsFromResource
+                  - elasticache:ListTagsForResource
+                Resource: "*"
+              # SNS（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - sns:SetTopicAttributes
+                  - sns:GetTopicAttributes
+                  - sns:TagResource
+                  - sns:UntagResource
+                Resource: "*"
+              # Kinesis（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - kinesis:PutResourcePolicy
+                  - kinesis:DeleteResourcePolicy
+                  - kinesis:AddTagsToStream
+                  - kinesis:RemoveTagsFromStream
+                  - kinesis:ListTagsForStream
+                Resource: "*"
+              # OpenSearch（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - es:UpdateElasticsearchDomainConfig
+                  - es:AddTags
+                  - es:RemoveTags
+                  - es:ListTags
+                Resource: "*"
+              # Lambda（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - lambda:GetFunctionConcurrency
+                  - lambda:PutFunctionConcurrency
+                  - lambda:DeleteFunctionConcurrency
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                  - lambda:InvokeFunction
+                Resource: "*"
+              # DynamoDB（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutResourcePolicy
+                  - dynamodb:DeleteResourcePolicy
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                  - dynamodb:ListTagsOfResource
+                Resource: "*"
+              # SQS（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - sqs:SetQueueAttributes
+                  - sqs:GetQueueAttributes
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                Resource: "*"
+              # S3（隔離・復旧用の追加権限）
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:PutBucketTagging
+                  - s3:DeleteBucketTagging
+                Resource: "*"
 
   # ── Step Functions IAM Role ─────────────────
   StateMachineRole:

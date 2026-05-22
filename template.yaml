@@ -129,6 +129,13 @@ Resources:
               - Effect: Allow
                 Action: [sts:GetCallerIdentity]
                 Resource: "*"
+              # CloudTrail（再有効化のため）
+              - Effect: Allow
+                Action:
+                  - cloudtrail:StartLogging
+                  - cloudtrail:GetTrailStatus
+                  - cloudtrail:DescribeTrails
+                Resource: "*"
 
   # ── Step Functions IAM Role ─────────────────
   StateMachineRole:
@@ -352,6 +359,34 @@ Resources:
             Type: Succeed
             Comment: "タグが付与されたため隔離解除・削除キャンセル"
 
+  # ── Lambda: CloudTrail Guardian ────────────
+  # タグ関係なく即時発動する専用フロー
+  # CloudTrailの無効化・削除・設定変更を監視する
+  CloudTrailGuardianFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-cloudtrail-guardian"
+      CodeUri: lambda/cloudtrail-guardian/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref AlertTopic
+      Events:
+        StopLogging:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: ["aws.cloudtrail"]
+              detail-type: ["AWS API Call via CloudTrail"]
+              detail:
+                eventName:
+                  - StopLogging
+                  - DeleteTrail
+                  - UpdateTrail
+                  - PutEventSelectors
+
 # ─────────────────────────────────────────────
 # 出力
 # ─────────────────────────────────────────────
@@ -362,3 +397,5 @@ Outputs:
     Value: !Ref AlertTopic
   DetectorFunctionArn:
     Value: !GetAtt DetectorFunction.Arn
+  CloudTrailGuardianFunctionArn:
+    Value: !GetAtt CloudTrailGuardianFunction.Arn

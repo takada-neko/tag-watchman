@@ -31,6 +31,11 @@ DEFAULT_REGION      = os.environ.get("AWS_REGION", "ap-northeast-1")
 tagging = boto3.client("resourcegroupstaggingapi")
 sfn     = boto3.client("stepfunctions")
 
+# 共通タグバリデーションユーティリティ
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from tag_validator import fetch_and_validate, get_required_tags
+
 
 # ─────────────────────────────────────────────────────────────
 # ARN 抽出ルール
@@ -316,17 +321,17 @@ def lambda_handler(event, context):
     # 少し待機（リソースがタグAPIに反映されるまでのラグ対策）
     time.sleep(5)
 
-    # タグチェック（Resource Groups Tagging API で統一）
-    missing_tags = _check_tags(arn)
+    # タグチェック（共通バリデーションユーティリティ）
+    missing_tags = fetch_and_validate(arn)
 
     if not missing_tags:
-        logger.info("All required tags present for %s", arn)
+        logger.info("All required tags valid for %s", arn)
         return {"status": "ok", "arn": arn}
 
-    logger.warning("Missing tags %s for %s", missing_tags, arn)
+    logger.warning("Tag violation %s for %s", missing_tags, arn)
 
-    # Step Functions を起動（通知→待機→削除）
-    _start_state_machine(arn, missing_tags, event_name, detail)
+    # Step Functions を起動
+    _start_state_machine(arn, missing_tags, get_required_tags(), event_name, detail)
 
     return {"status": "triggered", "arn": arn, "missing_tags": missing_tags}
 
@@ -360,7 +365,7 @@ def _check_tags(arn: str) -> list[str]:
 # Step Functions 起動
 # ─────────────────────────────────────────────────────────────
 
-def _start_state_machine(arn: str, missing_tags: list[str], event_name: str, detail: dict):
+def _start_state_machine(arn: str, missing_tags: list[str], required_tags: list[str], event_name: str, detail: dict):
     if not STATE_MACHINE_ARN:
         logger.error("STATE_MACHINE_ARN not set")
         return
@@ -368,7 +373,8 @@ def _start_state_machine(arn: str, missing_tags: list[str], event_name: str, det
     payload = {
         "arn":          arn,
         "missingTags":  missing_tags,
-        "requiredTags": REQUIRED_TAGS,
+        "requiredTags": required_tags,
+        "waitSeconds":  int(os.environ.get("DELETE_DELAY_SECONDS", "604800")),
         "eventName":    event_name,
         "principal":    detail.get("userIdentity", {}).get("arn", "unknown"),
         "region":       detail.get("awsRegion", DEFAULT_REGION),

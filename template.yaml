@@ -12,8 +12,18 @@ Description: >
 Parameters:
   RequiredTags:
     Type: String
-    Default: "Env,Owner,Project"
+    Default: "Env,Project,Owned"
     Description: 必須タグキー（カンマ区切り）
+
+  TagAllowedValues:
+    Type: String
+    Default: "Env:prod|stg|test,Project:my-project"
+    Description: タグ許可値（例 Env:prod|stg|test,Project:my-project）
+
+  TagMatchMode:
+    Type: String
+    Default: "Env:exact,Project:prefix"
+    Description: タグマッチモード（exact=完全一致 prefix=前方一致）
 
   DeleteDelaySeconds:
     Type: Number
@@ -53,7 +63,30 @@ Globals:
 # ─────────────────────────────────────────────
 Resources:
 
-  # ── SNS ────────────────────────────────────
+  # ── SSM Parameter Store（タグバリデーション設定）──
+  SsmRequiredTags:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /tagwatchman/required-tags
+      Type: String
+      Value: !Ref RequiredTags
+      Description: TagWatchman 必須タグキー（カンマ区切り）
+
+  SsmTagAllowedValues:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /tagwatchman/tag-allowed-values
+      Type: String
+      Value: !Ref TagAllowedValues
+      Description: タグ許可値（例 Env:prod|stg|test,Project:my-project）
+
+  SsmTagMatchMode:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /tagwatchman/tag-match-mode
+      Type: String
+      Value: !Ref TagMatchMode
+      Description: タグマッチモード（例 Env:exact,Project:prefix）
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:

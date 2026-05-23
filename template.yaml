@@ -2,54 +2,44 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
  
 Description: >
-  未承認リソース自動削除システム（汎用版）
-  Resource Groups Tagging API を使い、あらゆる AWS サービスに対応。
-  EventBridge → Detector Lambda → Step Functions (通知→待機→再チェック→削除)
+  TagWatchman - Untagged AWS Resource Auto-Isolator
+  Detects, isolates, and removes untagged AWS resources automatically.
  
-# ─────────────────────────────────────────────
-# パラメータ
-# ─────────────────────────────────────────────
 Parameters:
   RequiredTags:
     Type: String
     Default: "Env,Project,Owned"
-    Description: 必須タグキー（カンマ区切り）
+    Description: Required tag keys (comma-separated)
  
   TagAllowedValues:
     Type: String
     Default: "Env:prod|stg|test,Project:my-project"
-    Description: タグ許可値（例 Env:prod|stg|test,Project:my-project）
+    Description: Allowed tag values (e.g. Env:prod|stg|test,Project:my-project)
  
   TagMatchMode:
     Type: String
     Default: "Env:exact,Project:prefix"
-    Description: タグマッチモード（exact=完全一致 prefix=前方一致）
+    Description: Tag match mode (exact or prefix per key)
  
   DeleteDelaySeconds:
     Type: Number
     Default: 604800
-    Description: >
-      検知後、削除承認メールを送るまでの待機秒数。
-      デフォルト7日（604800秒）。SSM Parameter Store から再デプロイなしで変更可能。
-      金曜検知でも翌週に余裕を持って対応できるよう1週間を推奨。
+    Description: Seconds to wait before sending approval email (default 7 days)
  
   DryRun:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
-    Description: "true の場合は削除せず通知のみ"
+    Description: If true, detect and notify only (no isolation or deletion)
  
   NotificationEmail:
     Type: String
-    Description: SNS通知先メールアドレス（カンマ区切りで複数指定可）
+    Description: Notification email address (single address)
  
   VpcId:
     Type: AWS::EC2::VPC::Id
-    Description: 隔離用セキュリティグループを作成するVPC ID
+    Description: VPC ID for quarantine security group
  
-# ─────────────────────────────────────────────
-# グローバル設定
-# ─────────────────────────────────────────────
 Globals:
   Function:
     Runtime: python3.12
@@ -57,20 +47,18 @@ Globals:
     Environment:
       Variables:
         REQUIRED_TAGS: !Ref RequiredTags
+        SSM_PREFIX: "/tagwatchman"
  
-# ─────────────────────────────────────────────
-# リソース
-# ─────────────────────────────────────────────
 Resources:
  
-  # ── SSM Parameter Store（タグバリデーション設定）──
+  # ── SSM Parameters ──────────────────────────
   SsmRequiredTags:
     Type: AWS::SSM::Parameter
     Properties:
       Name: /tagwatchman/required-tags
       Type: String
       Value: !Ref RequiredTags
-      Description: TagWatchman 必須タグキー（カンマ区切り）
+      Description: TagWatchman required tag keys
  
   SsmTagAllowedValues:
     Type: AWS::SSM::Parameter
@@ -78,7 +66,7 @@ Resources:
       Name: /tagwatchman/tag-allowed-values
       Type: String
       Value: !Ref TagAllowedValues
-      Description: タグ許可値（例 Env:prod|stg|test,Project:my-project）
+      Description: TagWatchman allowed tag values
  
   SsmTagMatchMode:
     Type: AWS::SSM::Parameter
@@ -86,7 +74,9 @@ Resources:
       Name: /tagwatchman/tag-match-mode
       Type: String
       Value: !Ref TagMatchMode
-      Description: タグマッチモード（例 Env:exact,Project:prefix）
+      Description: TagWatchman tag match mode
+ 
+  # ── SNS Topic ───────────────────────────────
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -95,7 +85,15 @@ Resources:
         - Protocol: email
           Endpoint: !Ref NotificationEmail
  
-  # ── IAM Role（Lambda共通）──────────────────
+  # ── Quarantine Security Group ────────────────
+  QuarantineSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${AWS::StackName}-quarantine"
+      GroupDescription: "TagWatchman quarantine security group - deny all traffic"
+      VpcId: !Ref VpcId
+ 
+  # ── IAM Role for Lambda ──────────────────────
   LambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -110,69 +108,153 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: AutoDeletePolicy
+        - PolicyName: TagWatchmanPolicy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: [tag:GetResources]
+                Action: ["tag:GetResources"]
                 Resource: "*"
               - Effect: Allow
-                Action: [states:StartExecution]
+                Action: ["ssm:GetParameter"]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/tagwatchman/*"
+              - Effect: Allow
+                Action: ["states:StartExecution"]
                 Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-auto-delete"
               - Effect: Allow
-                Action: [sns:Publish, sns:DeleteTopic]
+                Action: ["sns:Publish"]
+                Resource: !Ref AlertTopic
+              - Effect: Allow
+                Action: ["lambda:InvokeFunction"]
                 Resource: "*"
               - Effect: Allow
-                Action: [ec2:DescribeTags, ec2:TerminateInstances]
+                Action: ["sts:GetCallerIdentity"]
                 Resource: "*"
-              - Effect: Allow
-                Action: [rds:DescribeDBInstances, rds:ListTagsForResource, rds:DeleteDBInstance]
-                Resource: "*"
-              - Effect: Allow
-                Action: [s3:GetBucketTagging, s3:ListBucket, s3:ListBucketVersions, s3:DeleteObject, s3:DeleteObjectVersion, s3:DeleteBucket]
-                Resource: "*"
-              - Effect: Allow
-                Action: [lambda:GetFunction, lambda:DeleteFunction]
-                Resource: "*"
-              - Effect: Allow
-                Action: [dynamodb:DescribeTable, dynamodb:DeleteTable]
-                Resource: "*"
-              - Effect: Allow
-                Action: [ecs:UpdateService, ecs:DeleteService, ecs:DeleteCluster]
-                Resource: "*"
-              - Effect: Allow
-                Action: [sqs:GetQueueUrl, sqs:DeleteQueue]
-                Resource: "*"
-              - Effect: Allow
-                Action: [eks:DeleteCluster]
-                Resource: "*"
-              - Effect: Allow
-                Action: [kinesis:DeleteStream]
-                Resource: "*"
-              - Effect: Allow
-                Action: [elasticache:DeleteReplicationGroup]
-                Resource: "*"
-              - Effect: Allow
-                Action: [es:DeleteElasticsearchDomain]
-                Resource: "*"
-              - Effect: Allow
-                Action: [glue:DeleteDatabase]
-                Resource: "*"
-              - Effect: Allow
-                Action: [sts:GetCallerIdentity]
-                Resource: "*"
-              # CloudTrail（再有効化のため）
               - Effect: Allow
                 Action:
-                  - cloudtrail:StartLogging
-                  - cloudtrail:GetTrailStatus
-                  - cloudtrail:DescribeTrails
+                  - ec2:DescribeTags
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSecurityGroups
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:TerminateInstances
+                  - ec2:DescribeInternetGateways
+                  - ec2:DetachInternetGateway
+                  - ec2:DeleteInternetGateway
+                  - ec2:DescribeNatGateways
+                  - ec2:DeleteNatGateway
+                  - ec2:DescribeVpcPeeringConnections
+                  - ec2:DeleteVpcPeeringConnection
                 Resource: "*"
-              # ECR
               - Effect: Allow
                 Action:
-                  - ecr:DescribeRepositories
+                  - rds:DescribeDBInstances
+                  - rds:ListTagsForResource
+                  - rds:AddTagsToResource
+                  - rds:RemoveTagsFromResource
+                  - rds:ModifyDBInstance
+                  - rds:DeleteDBInstance
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketTagging
+                  - s3:PutBucketTagging
+                  - s3:DeleteBucketTagging
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                  - s3:DeleteBucket
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConcurrency
+                  - lambda:PutFunctionConcurrency
+                  - lambda:DeleteFunctionConcurrency
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                  - lambda:DeleteFunction
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:ListTagsOfResource
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                  - dynamodb:PutResourcePolicy
+                  - dynamodb:DeleteResourcePolicy
+                  - dynamodb:DeleteTable
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:ListTagsForResource
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                  - ecs:UpdateService
+                  - ecs:DeleteService
+                  - ecs:DeleteCluster
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                  - eks:ListTagsForResource
+                  - eks:TagResource
+                  - eks:UntagResource
+                  - eks:UpdateClusterConfig
+                  - eks:DeleteCluster
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                  - sqs:SetQueueAttributes
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                  - sqs:DeleteQueue
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:GetTopicAttributes
+                  - sns:SetTopicAttributes
+                  - sns:TagResource
+                  - sns:UntagResource
+                  - sns:DeleteTopic
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kinesis:PutResourcePolicy
+                  - kinesis:DeleteResourcePolicy
+                  - kinesis:AddTagsToStream
+                  - kinesis:RemoveTagsFromStream
+                  - kinesis:DeleteStream
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - elasticache:DescribeReplicationGroups
+                  - elasticache:DescribeCacheClusters
+                  - elasticache:ModifyReplicationGroup
+                  - elasticache:AddTagsToResource
+                  - elasticache:RemoveTagsFromResource
+                  - elasticache:ListTagsForResource
+                  - elasticache:DeleteReplicationGroup
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - es:UpdateElasticsearchDomainConfig
+                  - es:AddTags
+                  - es:RemoveTags
+                  - es:ListTags
+                  - es:DeleteElasticsearchDomain
+                Resource: "*"
+              - Effect: Allow
+                Action:
                   - ecr:GetRepositoryPolicy
                   - ecr:SetRepositoryPolicy
                   - ecr:DeleteRepositoryPolicy
@@ -181,7 +263,6 @@ Resources:
                   - ecr:ListTagsForResource
                   - ecr:DeleteRepository
                 Resource: "*"
-              # Redshift
               - Effect: Allow
                 Action:
                   - redshift:DescribeClusters
@@ -191,7 +272,6 @@ Resources:
                   - redshift:ModifyCluster
                   - redshift:DeleteCluster
                 Resource: "*"
-              # Step Functions
               - Effect: Allow
                 Action:
                   - states:DescribeStateMachine
@@ -201,8 +281,8 @@ Resources:
                   - states:SetResourcePolicy
                   - states:DeleteResourcePolicy
                   - states:DeleteStateMachine
+                  - states:DescribeExecution
                 Resource: "*"
-              # Workspaces
               - Effect: Allow
                 Action:
                   - workspaces:DescribeWorkspaces
@@ -211,22 +291,17 @@ Resources:
                   - workspaces:DeleteTags
                   - workspaces:TerminateWorkspaces
                 Resource: "*"
-              # IGW / NAT Gateway / VPC Peering
               - Effect: Allow
                 Action:
-                  - ec2:DescribeInternetGateways
-                  - ec2:DetachInternetGateway
-                  - ec2:DeleteInternetGateway
-                  - ec2:DescribeNatGateways
-                  - ec2:DeleteNatGateway
-                  - ec2:DescribeVpcPeeringConnections
-                  - ec2:DeleteVpcPeeringConnection
-                  - ec2:DescribeInstances
-                  - ec2:ModifyInstanceAttribute
-                  - ec2:CreateTags
-                  - ec2:DeleteTags
+                  - glue:DeleteDatabase
                 Resource: "*"
-              # IAM Role / User
+              - Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:DELETE
+                  - apigateway:PATCH
+                  - apigateway:PUT
+                Resource: "*"
               - Effect: Allow
                 Action:
                   - iam:GetRole
@@ -256,105 +331,14 @@ Resources:
                   - iam:UntagUser
                   - iam:DeleteUser
                 Resource: "*"
-              # API Gateway
               - Effect: Allow
                 Action:
-                  - apigateway:GET
-                  - apigateway:DELETE
-                  - apigateway:PATCH
-                  - apigateway:PUT
-                Resource: "*"
-              # ECS（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - ecs:DescribeServices
-                  - ecs:ListTagsForResource
-                  - ecs:TagResource
-                  - ecs:UntagResource
-                Resource: "*"
-              # EKS（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - eks:DescribeCluster
-                  - eks:UpdateClusterConfig
-                  - eks:ListTagsForResource
-                  - eks:TagResource
-                  - eks:UntagResource
-                Resource: "*"
-              # ElastiCache（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - elasticache:DescribeReplicationGroups
-                  - elasticache:DescribeCacheClusters
-                  - elasticache:ModifyReplicationGroup
-                  - elasticache:AddTagsToResource
-                  - elasticache:RemoveTagsFromResource
-                  - elasticache:ListTagsForResource
-                Resource: "*"
-              # SNS（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - sns:SetTopicAttributes
-                  - sns:GetTopicAttributes
-                  - sns:TagResource
-                  - sns:UntagResource
-                Resource: "*"
-              # Kinesis（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - kinesis:PutResourcePolicy
-                  - kinesis:DeleteResourcePolicy
-                  - kinesis:AddTagsToStream
-                  - kinesis:RemoveTagsFromStream
-                  - kinesis:ListTagsForStream
-                Resource: "*"
-              # OpenSearch（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - es:UpdateElasticsearchDomainConfig
-                  - es:AddTags
-                  - es:RemoveTags
-                  - es:ListTags
-                Resource: "*"
-              # Lambda（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - lambda:GetFunctionConcurrency
-                  - lambda:PutFunctionConcurrency
-                  - lambda:DeleteFunctionConcurrency
-                  - lambda:TagResource
-                  - lambda:UntagResource
-                  - lambda:ListTags
-                  - lambda:InvokeFunction
-                Resource: "*"
-              # DynamoDB（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - dynamodb:PutResourcePolicy
-                  - dynamodb:DeleteResourcePolicy
-                  - dynamodb:TagResource
-                  - dynamodb:UntagResource
-                  - dynamodb:ListTagsOfResource
-                Resource: "*"
-              # SQS（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - sqs:SetQueueAttributes
-                  - sqs:GetQueueAttributes
-                  - sqs:TagQueue
-                  - sqs:UntagQueue
-                Resource: "*"
-              # S3（隔離・復旧用の追加権限）
-              - Effect: Allow
-                Action:
-                  - s3:GetBucketPolicy
-                  - s3:PutBucketPolicy
-                  - s3:DeleteBucketPolicy
-                  - s3:PutBucketTagging
-                  - s3:DeleteBucketTagging
+                  - cloudtrail:StartLogging
+                  - cloudtrail:GetTrailStatus
+                  - cloudtrail:DescribeTrails
                 Resource: "*"
  
-  # ── Step Functions IAM Role ─────────────────
+  # ── IAM Role for Step Functions ──────────────
   StateMachineRole:
     Type: AWS::IAM::Role
     Properties:
@@ -374,11 +358,11 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource:
+                  - !GetAtt IsolatorFunction.Arn
                   - !GetAtt NotifierFunction.Arn
                   - !GetAtt RecheckFunction.Arn
-                  - !GetAtt DeleterFunction.Arn
  
-  # ── Lambda: Detector ───────────────────────
+  # ── Lambda: Detector ─────────────────────────
   DetectorFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -390,6 +374,7 @@ Resources:
       Environment:
         Variables:
           STATE_MACHINE_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-auto-delete"
+          DELETE_DELAY_SECONDS: !Ref DeleteDelaySeconds
       Events:
         AllCloudTrailEvents:
           Type: EventBridgeRule
@@ -397,7 +382,21 @@ Resources:
             Pattern:
               detail-type: ["AWS API Call via CloudTrail"]
  
-  # ── Lambda: Notifier ───────────────────────
+  # ── Lambda: Isolator ─────────────────────────
+  IsolatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-isolator"
+      CodeUri: lambda/isolator/
+      Handler: index.lambda_handler
+      Timeout: 60
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          DRY_RUN: !Ref DryRun
+          QUARANTINE_SG_ID: !Ref QuarantineSecurityGroup
+ 
+  # ── Lambda: Notifier ─────────────────────────
   NotifierFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -412,21 +411,7 @@ Resources:
           DELETE_DELAY_SECONDS: !Ref DeleteDelaySeconds
           APPROVAL_BASE_URL: !Sub "https://${ApprovalApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
  
-  # ── Lambda: Isolator ───────────────────────
-  IsolatorFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub "${AWS::StackName}-isolator"
-      CodeUri: lambda/isolator/
-      Handler: index.lambda_handler
-      Timeout: 60
-      Role: !GetAtt LambdaRole.Arn
-      Environment:
-        Variables:
-          DRY_RUN: !Ref DryRun
-          QUARANTINE_SG_ID: !Ref QuarantineSecurityGroup
- 
-  # ── Lambda: Recheck ────────────────────────
+  # ── Lambda: Recheck ──────────────────────────
   RecheckFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -439,7 +424,7 @@ Resources:
         Variables:
           RESTORER_FUNCTION_ARN: !GetAtt RestorerFunction.Arn
  
-  # ── Lambda: Restorer ───────────────────────
+  # ── Lambda: Restorer ─────────────────────────
   RestorerFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -452,7 +437,7 @@ Resources:
         Variables:
           DRY_RUN: !Ref DryRun
  
-  # ── Lambda: Approver ───────────────────────
+  # ── Lambda: Approver ─────────────────────────
   ApproverFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -464,9 +449,16 @@ Resources:
       Environment:
         Variables:
           DELETER_FUNCTION_ARN: !GetAtt DeleterFunction.Arn
-          STATE_MACHINE_ARN: !Ref AutoDeleteStateMachine
+          STATE_MACHINE_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-auto-delete"
+      Events:
+        ApproveGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApprovalApi
+            Path: /approve
+            Method: GET
  
-  # ── Lambda: Deleter ────────────────────────
+  # ── Lambda: Deleter ──────────────────────────
   DeleterFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -479,106 +471,7 @@ Resources:
         Variables:
           DRY_RUN: !Ref DryRun
  
-  # ── 全拒否セキュリティグループ ──────────────
-  QuarantineSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Sub "${AWS::StackName}-quarantine"
-      GroupDescription: "TagWatchman quarantine security group - deny all traffic"
-      VpcId: !Ref VpcId
-      # インバウンド・アウトバウンドのルールなし = 全拒否
- 
-  # ── API Gateway（承認URL用）────────────────
-  ApprovalApi:
-    Type: AWS::Serverless::Api
-    Properties:
-      Name: !Sub "${AWS::StackName}-approval-api"
-      StageName: prod
- 
-  ApproverFunctionPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt ApproverFunction.Arn
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApprovalApi}/*/GET/approve"
- 
-  # ── Step Functions ─────────────────────────
-  AutoDeleteStateMachine:
-    Type: AWS::StepFunctions::StateMachine
-    Properties:
-      StateMachineName: !Sub "${AWS::StackName}-auto-delete"
-      RoleArn: !GetAtt StateMachineRole.Arn
-      DefinitionSubstitutions:
-        NotifierArn:  !GetAtt NotifierFunction.Arn
-        IsolatorArn:  !GetAtt IsolatorFunction.Arn
-        RecheckArn:   !GetAtt RecheckFunction.Arn
-        WaitSeconds:  !Ref DeleteDelaySeconds
-      Definition:
-        Comment: "検知→隔離→通知→待機→再チェック→承認依頼"
-        StartAt: Isolate
-        States:
-          Isolate:
-            Type: Task
-            Resource: "${IsolatorArn}"
-            ResultPath: "null"
-            Next: NotifyDetection
-          NotifyDetection:
-            Type: Task
-            Resource: "${NotifierArn}"
-            Parameters:
-              mailType: "detection"
-              arn.$: "$.arn"
-              missingTags.$: "$.missingTags"
-              requiredTags.$: "$.requiredTags"
-              principal.$: "$.principal"
-              region.$: "$.region"
-              eventName.$: "$.eventName"
-            ResultPath: "null"
-            Next: Wait
-          Wait:
-            Type: Wait
-            SecondsPath: "$.waitSeconds"
-            Next: RecheckTags
-          RecheckTags:
-            Type: Task
-            Resource: "${RecheckArn}"
-            Next: ShouldDelete
-          ShouldDelete:
-            Type: Choice
-            Choices:
-              - Variable: "$.stillMissingTags"
-                BooleanEquals: true
-                Next: NotifyApproval
-            Default: Cancelled
-          NotifyApproval:
-            Type: Task
-            Resource: "${NotifierArn}"
-            Parameters:
-              mailType: "approval"
-              arn.$: "$.arn"
-              missingTags.$: "$.missingTags"
-              requiredTags.$: "$.requiredTags"
-              principal.$: "$.principal"
-              region.$: "$.region"
-              executionId.$: "$$.Execution.Name"
-            ResultPath: "null"
-            Next: WaitForApproval
-          WaitForApproval:
-            Type: Wait
-            Seconds: 2592000
-            Comment: "承認待機（最大30日）承認URLクリックで Approver Lambda が削除を実行"
-            Next: Timeout
-          Timeout:
-            Type: Succeed
-            Comment: "承認されないまま30日経過 — タイムアウト"
-          Cancelled:
-            Type: Succeed
-            Comment: "タグが付与されたため隔離解除・削除キャンセル"
- 
-  # ── Lambda: CloudTrail Guardian ────────────
-  # タグ関係なく即時発動する専用フロー
-  # CloudTrailの無効化・削除・設定変更を監視する
+  # ── Lambda: CloudTrail Guardian ──────────────
   CloudTrailGuardianFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -591,7 +484,7 @@ Resources:
         Variables:
           SNS_TOPIC_ARN: !Ref AlertTopic
       Events:
-        StopLogging:
+        CloudTrailEvents:
           Type: EventBridgeRule
           Properties:
             Pattern:
@@ -604,15 +497,112 @@ Resources:
                   - UpdateTrail
                   - PutEventSelectors
  
-# ─────────────────────────────────────────────
-# 出力
-# ─────────────────────────────────────────────
+  # ── API Gateway ──────────────────────────────
+  ApprovalApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-approval-api"
+      StageName: prod
+ 
+  # ── Step Functions ───────────────────────────
+  AutoDeleteStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-auto-delete"
+      RoleArn: !GetAtt StateMachineRole.Arn
+      DefinitionSubstitutions:
+        NotifierArn: !GetAtt NotifierFunction.Arn
+        IsolatorArn: !GetAtt IsolatorFunction.Arn
+        RecheckArn: !GetAtt RecheckFunction.Arn
+      DefinitionString: !Sub
+        - |
+          {
+            "Comment": "TagWatchman: detect -> isolate -> notify -> wait -> recheck -> approve -> delete",
+            "StartAt": "Isolate",
+            "States": {
+              "Isolate": {
+                "Type": "Task",
+                "Resource": "${IsolatorArn}",
+                "ResultPath": null,
+                "Next": "NotifyDetection"
+              },
+              "NotifyDetection": {
+                "Type": "Task",
+                "Resource": "${NotifierArn}",
+                "Parameters": {
+                  "mailType": "detection",
+                  "arn.$": "$.arn",
+                  "missingTags.$": "$.missingTags",
+                  "requiredTags.$": "$.requiredTags",
+                  "principal.$": "$.principal",
+                  "region.$": "$.region",
+                  "eventName.$": "$.eventName"
+                },
+                "ResultPath": null,
+                "Next": "Wait"
+              },
+              "Wait": {
+                "Type": "Wait",
+                "SecondsPath": "$.waitSeconds",
+                "Next": "RecheckTags"
+              },
+              "RecheckTags": {
+                "Type": "Task",
+                "Resource": "${RecheckArn}",
+                "Next": "ShouldDelete"
+              },
+              "ShouldDelete": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.stillMissingTags",
+                    "BooleanEquals": true,
+                    "Next": "NotifyApproval"
+                  }
+                ],
+                "Default": "Cancelled"
+              },
+              "NotifyApproval": {
+                "Type": "Task",
+                "Resource": "${NotifierArn}",
+                "Parameters": {
+                  "mailType": "approval",
+                  "arn.$": "$.arn",
+                  "missingTags.$": "$.missingTags",
+                  "requiredTags.$": "$.requiredTags",
+                  "principal.$": "$.principal",
+                  "region.$": "$.region",
+                  "executionId.$": "$$.Execution.Name"
+                },
+                "ResultPath": null,
+                "Next": "WaitForApproval"
+              },
+              "WaitForApproval": {
+                "Type": "Wait",
+                "Seconds": 2592000,
+                "Next": "Timeout"
+              },
+              "Timeout": {
+                "Type": "Succeed"
+              },
+              "Cancelled": {
+                "Type": "Succeed"
+              }
+            }
+          }
+        - IsolatorArn: !GetAtt IsolatorFunction.Arn
+          NotifierArn: !GetAtt NotifierFunction.Arn
+          RecheckArn: !GetAtt RecheckFunction.Arn
+ 
 Outputs:
   StateMachineArn:
     Value: !Ref AutoDeleteStateMachine
   SnsTopicArn:
     Value: !Ref AlertTopic
+  ApprovalApiUrl:
+    Value: !Sub "https://${ApprovalApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
   DetectorFunctionArn:
     Value: !GetAtt DetectorFunction.Arn
   CloudTrailGuardianFunctionArn:
     Value: !GetAtt CloudTrailGuardianFunction.Arn
+ 

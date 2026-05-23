@@ -484,7 +484,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub "${AWS::StackName}-quarantine"
-      GroupDescription: "TagWatchman — 全通信拒否（隔離用）"
+      GroupDescription: "TagWatchman quarantine security group - deny all traffic"
       VpcId: !Ref VpcId
       # インバウンド・アウトバウンドのルールなし = 全拒否
  

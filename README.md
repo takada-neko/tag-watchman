@@ -148,7 +148,7 @@ sam deploy --parameter-overrides DryRun=false
 
 ## アーキテクチャ
 
-<img height="700" alt="image" src="https://github.com/user-attachments/assets/1dcebb80-e476-4cd5-915e-d0d23fdbd996" />
+<img height="800" alt="image" src="https://github.com/user-attachments/assets/1dcebb80-e476-4cd5-915e-d0d23fdbd996" />
 
 ---
 

@@ -1,7 +1,0 @@
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-verbosity = 2
-
-[tool.coverage.run]
-source = ["lambda"]
-omit = ["tests/*"]

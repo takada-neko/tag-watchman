@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-
+ 
 Description: >
   未承認リソース自動削除システム（汎用版）
   Resource Groups Tagging API を使い、あらゆる AWS サービスに対応。
   EventBridge → Detector Lambda → Step Functions (通知→待機→再チェック→削除)
-
+ 
 # ─────────────────────────────────────────────
 # パラメータ
 # ─────────────────────────────────────────────
@@ -14,17 +14,17 @@ Parameters:
     Type: String
     Default: "Env,Project,Owned"
     Description: 必須タグキー（カンマ区切り）
-
+ 
   TagAllowedValues:
     Type: String
     Default: "Env:prod|stg|test,Project:my-project"
     Description: タグ許可値（例 Env:prod|stg|test,Project:my-project）
-
+ 
   TagMatchMode:
     Type: String
     Default: "Env:exact,Project:prefix"
     Description: タグマッチモード（exact=完全一致 prefix=前方一致）
-
+ 
   DeleteDelaySeconds:
     Type: Number
     Default: 604800
@@ -32,21 +32,21 @@ Parameters:
       検知後、削除承認メールを送るまでの待機秒数。
       デフォルト7日（604800秒）。SSM Parameter Store から再デプロイなしで変更可能。
       金曜検知でも翌週に余裕を持って対応できるよう1週間を推奨。
-
+ 
   DryRun:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: "true の場合は削除せず通知のみ"
-
+ 
   NotificationEmail:
     Type: String
     Description: SNS通知先メールアドレス（カンマ区切りで複数指定可）
-
+ 
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: 隔離用セキュリティグループを作成するVPC ID
-
+ 
 # ─────────────────────────────────────────────
 # グローバル設定
 # ─────────────────────────────────────────────
@@ -57,12 +57,12 @@ Globals:
     Environment:
       Variables:
         REQUIRED_TAGS: !Ref RequiredTags
-
+ 
 # ─────────────────────────────────────────────
 # リソース
 # ─────────────────────────────────────────────
 Resources:
-
+ 
   # ── SSM Parameter Store（タグバリデーション設定）──
   SsmRequiredTags:
     Type: AWS::SSM::Parameter
@@ -71,7 +71,7 @@ Resources:
       Type: String
       Value: !Ref RequiredTags
       Description: TagWatchman 必須タグキー（カンマ区切り）
-
+ 
   SsmTagAllowedValues:
     Type: AWS::SSM::Parameter
     Properties:
@@ -79,7 +79,7 @@ Resources:
       Type: String
       Value: !Ref TagAllowedValues
       Description: タグ許可値（例 Env:prod|stg|test,Project:my-project）
-
+ 
   SsmTagMatchMode:
     Type: AWS::SSM::Parameter
     Properties:
@@ -94,7 +94,7 @@ Resources:
       Subscription:
         - Protocol: email
           Endpoint: !Ref NotificationEmail
-
+ 
   # ── IAM Role（Lambda共通）──────────────────
   LambdaRole:
     Type: AWS::IAM::Role
@@ -353,7 +353,7 @@ Resources:
                   - s3:PutBucketTagging
                   - s3:DeleteBucketTagging
                 Resource: "*"
-
+ 
   # ── Step Functions IAM Role ─────────────────
   StateMachineRole:
     Type: AWS::IAM::Role
@@ -377,7 +377,7 @@ Resources:
                   - !GetAtt NotifierFunction.Arn
                   - !GetAtt RecheckFunction.Arn
                   - !GetAtt DeleterFunction.Arn
-
+ 
   # ── Lambda: Detector ───────────────────────
   DetectorFunction:
     Type: AWS::Serverless::Function
@@ -396,7 +396,7 @@ Resources:
           Properties:
             Pattern:
               detail-type: ["AWS API Call via CloudTrail"]
-
+ 
   # ── Lambda: Notifier ───────────────────────
   NotifierFunction:
     Type: AWS::Serverless::Function
@@ -411,7 +411,7 @@ Resources:
           SNS_TOPIC_ARN: !Ref AlertTopic
           DELETE_DELAY_SECONDS: !Ref DeleteDelaySeconds
           APPROVAL_BASE_URL: !Sub "https://${ApprovalApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
-
+ 
   # ── Lambda: Isolator ───────────────────────
   IsolatorFunction:
     Type: AWS::Serverless::Function
@@ -425,7 +425,7 @@ Resources:
         Variables:
           DRY_RUN: !Ref DryRun
           QUARANTINE_SG_ID: !Ref QuarantineSecurityGroup
-
+ 
   # ── Lambda: Recheck ────────────────────────
   RecheckFunction:
     Type: AWS::Serverless::Function
@@ -438,7 +438,7 @@ Resources:
       Environment:
         Variables:
           RESTORER_FUNCTION_ARN: !GetAtt RestorerFunction.Arn
-
+ 
   # ── Lambda: Restorer ───────────────────────
   RestorerFunction:
     Type: AWS::Serverless::Function
@@ -451,7 +451,7 @@ Resources:
       Environment:
         Variables:
           DRY_RUN: !Ref DryRun
-
+ 
   # ── Lambda: Approver ───────────────────────
   ApproverFunction:
     Type: AWS::Serverless::Function
@@ -465,7 +465,7 @@ Resources:
         Variables:
           DELETER_FUNCTION_ARN: !GetAtt DeleterFunction.Arn
           STATE_MACHINE_ARN: !Ref AutoDeleteStateMachine
-
+ 
   # ── Lambda: Deleter ────────────────────────
   DeleterFunction:
     Type: AWS::Serverless::Function
@@ -478,7 +478,7 @@ Resources:
       Environment:
         Variables:
           DRY_RUN: !Ref DryRun
-
+ 
   # ── 全拒否セキュリティグループ ──────────────
   QuarantineSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -487,14 +487,14 @@ Resources:
       GroupDescription: "TagWatchman — 全通信拒否（隔離用）"
       VpcId: !Ref VpcId
       # インバウンド・アウトバウンドのルールなし = 全拒否
-
+ 
   # ── API Gateway（承認URL用）────────────────
   ApprovalApi:
     Type: AWS::Serverless::Api
     Properties:
       Name: !Sub "${AWS::StackName}-approval-api"
       StageName: prod
-
+ 
   ApproverFunctionPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -502,7 +502,7 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApprovalApi}/*/GET/approve"
-
+ 
   # ── Step Functions ─────────────────────────
   AutoDeleteStateMachine:
     Type: AWS::StepFunctions::StateMachine
@@ -521,7 +521,7 @@ Resources:
           Isolate:
             Type: Task
             Resource: "${IsolatorArn}"
-            ResultPath: null
+            ResultPath: "null"
             Next: NotifyDetection
           NotifyDetection:
             Type: Task
@@ -534,7 +534,7 @@ Resources:
               principal.$: "$.principal"
               region.$: "$.region"
               eventName.$: "$.eventName"
-            ResultPath: null
+            ResultPath: "null"
             Next: Wait
           Wait:
             Type: Wait
@@ -562,7 +562,7 @@ Resources:
               principal.$: "$.principal"
               region.$: "$.region"
               executionId.$: "$$.Execution.Name"
-            ResultPath: null
+            ResultPath: "null"
             Next: WaitForApproval
           WaitForApproval:
             Type: Wait
@@ -575,7 +575,7 @@ Resources:
           Cancelled:
             Type: Succeed
             Comment: "タグが付与されたため隔離解除・削除キャンセル"
-
+ 
   # ── Lambda: CloudTrail Guardian ────────────
   # タグ関係なく即時発動する専用フロー
   # CloudTrailの無効化・削除・設定変更を監視する
@@ -603,7 +603,7 @@ Resources:
                   - DeleteTrail
                   - UpdateTrail
                   - PutEventSelectors
-
+ 
 # ─────────────────────────────────────────────
 # 出力
 # ─────────────────────────────────────────────

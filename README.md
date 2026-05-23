@@ -148,33 +148,7 @@ sam deploy --parameter-overrides DryRun=false
 
 ## アーキテクチャ
 
-```
-EventBridge（全CloudTrailイベント）
-    │
-    ├─ CloudTrail操作イベント ──────────────────────────────────────┐
-    │                                                              ▼
-    │                                              ┌──────────────────────────┐
-    │                                              │ CloudTrail Guardian Lambda│
-    │                                              │ 自動再有効化 + CRITICAL警告│
-    │                                              └──────────────────────────┘
-    │
-    └─ リソース作成イベント
-            ▼
-    ┌─────────────────┐
-    │ Detector Lambda │  ARN抽出 + タグチェック
-    └────────┬────────┘
-             │ タグ不足
-             ▼
-    ┌──────────────────────────────────────────────────────┐
-    │                   Step Functions                     │
-    │                                                      │
-    │  Isolator → Notifier①→ Wait（7日）→ Recheck → 判定  │
-    │                 ↑ タグ付与で復旧          ↓ まだ不足 │
-    │              Restorer               Notifier② → 承認URL待機
-    │                                              ↓ クリック
-    │                                           Approver → Deleter
-    └──────────────────────────────────────────────────────┘
-```
+<img height="700" alt="image" src="https://github.com/user-attachments/assets/1dcebb80-e476-4cd5-915e-d0d23fdbd996" />
 
 ---
 

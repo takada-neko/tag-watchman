@@ -72,7 +72,7 @@ UpdateTrail  → ⚠️ WARNING警告メール
 | メッセージング | SQS, SNS, Kinesis | ポリシーで全拒否 | タグ付与で自動復旧 |
 | 分析 | Glue, OpenSearch | ポリシーで全拒否 | タグ付与で自動復旧 |
 | オーケストレーション | Step Functions | リソースポリシーで全拒否 | タグ付与で自動復旧 |
-| ネットワーク | IGW, NAT Gateway, VPC Peering, EIP | 条件付き即時削除 ※1 | — |
+| ネットワーク | IGW, NAT Gateway, VPC Peering, ElasticIP | 条件付き即時削除 ※1 | — |
 | ネットワーク（通知のみ） | VPC | 通知のみ ※2 | — |
 | 認証・認可 | IAM Role, IAM User | ポリシー全剥奪 + アクセスキー無効化 ※3 | タグ付与でタグ削除（ポリシー再付与は手動） |
 | API | API Gateway | ステージ削除によるエンドポイント無効化 | タグ付与で自動復旧 |
@@ -83,7 +83,7 @@ UpdateTrail  → ⚠️ WARNING警告メール
 **※1 ネットワーク系（条件付き即時削除）の挙動**
 - IGW: アタッチなし → 即時削除 / アタッチあり → 通知のみ
 - NAT Gateway / VPC Peering: 即時削除
-- EIP: アタッチなし → 即時解放 / アタッチあり → 通知のみ
+- ElasticIP: アタッチなし → 即時解放 / アタッチあり → 通知のみ
 
 **※2 VPCを通知のみにする理由**
 - 削除すると内部の全リソースの通信が止まる。影響範囲が大きすぎるため自動対応不可

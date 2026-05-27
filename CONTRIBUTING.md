@@ -18,5 +18,5 @@
 
 ## ライセンス
 
-All Rights Reserved © 2025 TagWatchman  
+All Rights Reserved © 2026 TagWatchman  
 本ソフトウェアの無断複製・配布・改変を禁じます。

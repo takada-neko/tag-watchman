@@ -121,13 +121,7 @@ Project = my-api
 Owned   = backend
 ```
 
-**TagWatchman SSM設定例：**
-
-```
-/tagwatchman/required-tags      = Env,Project,Owned
-/tagwatchman/tag-allowed-values = Env:prod|stg|test,Project:your-project
-/tagwatchman/tag-match-mode     = Env:exact,Project:prefix
-```
+> 詳細な設定方法（許可値の設定・判定ルールなど）は購入者向けのドキュメントに記載しています。
 
 ---
 

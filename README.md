@@ -134,14 +134,16 @@ sam deploy --parameter-overrides DryRun=false
  
 ## 設定のカスタマイズ
  
-猶予期間などの設定は **AWS Systems Manager Parameter Store** から変更できます。再デプロイ不要です。
+タグの判定ルール・猶予期間などは **AWS Systems Manager Parameter Store** から変更できます。再デプロイ不要です。
  
 | パラメータ名 | デフォルト | 説明 |
 |---|---|---|
-| `/tagwatchman/required-tags` | `Env,Owner,Project` | 必須タグキー |
+| `/tagwatchman/required-tags` | `Env,Project,Owned` | 必須タグキー |
 | `/tagwatchman/delete-delay-seconds` | `604800`（7日） | 猶予期間（秒） |
 | `/tagwatchman/dry-run` | `false` | trueにすると削除しない |
  
+> 詳細な設定方法（タグの判定ルール・許可値の設定など）は購入者向けのドキュメントに記載しています。
+
 ---
  
 ## アーキテクチャ

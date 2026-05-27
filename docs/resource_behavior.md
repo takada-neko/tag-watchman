@@ -178,4 +178,4 @@ A. 必須タグを付与することで対象外になります。TagWatchmanは
 
 ---
 
-© 2025 TagWatchman All Rights Reserved.
+© 2026 TagWatchman All Rights Reserved.

@@ -223,7 +223,7 @@ A. 必須タグを付与することで対象外になります。TagWatchmanは
 ---
 ## ライセンス
  
-本ソフトウェアは [Apache License 2.0](LICENSE) の下で公開されています。
+本ソフトウェアは [Apache License 2.0](../LICENSE) の下で公開されています。
  
 Copyright © 2026 takada-neko
  

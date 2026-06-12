@@ -221,6 +221,9 @@ A. SSM Parameter Storeの `/tagwatchman/delete-delay-seconds` を変更してく
 A. 必須タグを付与することで対象外になります。TagWatchmanは「タグが不足している」ことのみをトリガーにしています。
  
 ---
+## ライセンス
  
-© 2026 TagWatchman All Rights Reserved.
+本ソフトウェアは [Apache License 2.0](LICENSE) の下で公開されています。
+ 
+Copyright © 2026 takada-neko
  

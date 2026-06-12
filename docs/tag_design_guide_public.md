@@ -146,6 +146,9 @@ Owned   = backend
 👉 [TagWatchman 有料セットを購入する（¥9,900）](https://github.com/takada-neko/tag-watchman)
  
 ---
+## ライセンス
  
-© 2026 TagWatchman All Rights Reserved.
+本ソフトウェアは [Apache License 2.0](LICENSE) の下で公開されています。
+ 
+Copyright © 2026 takada-neko
  

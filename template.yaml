@@ -1,0 +1,836 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+ 
+Description: >
+  TagWatchman - Untagged AWS Resource Auto-Isolator
+  Detects, isolates, and removes untagged AWS resources automatically.
+ 
+Parameters:
+  RequiredTags:
+    Type: String
+    Default: "Env,Project,Owned"
+    Description: Required tag keys (comma-separated)
+ 
+  TagAllowedValues:
+    Type: String
+    Default: "Env:prod|stg|test,Project:my-project"
+    Description: Allowed tag values (e.g. Env:prod|stg|test,Project:my-project)
+ 
+  TagMatchMode:
+    Type: String
+    Default: "Env:exact,Project:prefix"
+    Description: Tag match mode (exact or prefix per key)
+ 
+  DeleteDelaySeconds:
+    Type: Number
+    Default: 604800
+    Description: Seconds to wait before sending approval email (default 7 days)
+ 
+  DryRun:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: If true, detect and notify only (no isolation or deletion)
+ 
+  NotificationEmail:
+    Type: String
+    Description: Notification email address (single address)
+ 
+  TrustedPrincipals:
+    Type: CommaDelimitedList
+    Description: >
+      IAM entity ARNs allowed to assume the tag-restore operator role
+      (comma-separated). e.g. arn:aws:iam::123456789012:role/Admin
+  OperatorAllowedCidr:
+    Type: String
+    Default: ""
+    Description: >
+      Optional. CIDR allowed to use the operator role (e.g. 203.0.113.0/24).
+      Leave blank for no IP restriction.
+
+  LateTagWaitSeconds:
+    Type: Number
+    Default: 25
+    Description: late-tag グレースの単発 Wait 秒数。Kinesis CreateStream の構造ギャップ実測13s+マージン。
+ 
+Conditions:
+  HasCidrRestriction: !Not [!Equals [!Ref OperatorAllowedCidr, ""]]
+ 
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 128
+    Environment:
+      Variables:
+        REQUIRED_TAGS: !Ref RequiredTags
+        SSM_PREFIX: "/tagwatchman"
+        SELF_PROTECT_PREFIX: !Sub "${AWS::StackName}-"
+ 
+Resources:
+ 
+  # ── SSM Parameters ──────────────────────────
+  SsmRequiredTags:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /tagwatchman/required-tags
+      Type: String
+      Value: !Ref RequiredTags
+      Description: TagWatchman required tag keys
+ 
+  SsmTagAllowedValues:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /tagwatchman/tag-allowed-values
+      Type: String
+      Value: !Ref TagAllowedValues
+      Description: TagWatchman allowed tag values
+ 
+  SsmTagMatchMode:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /tagwatchman/tag-match-mode
+      Type: String
+      Value: !Ref TagMatchMode
+      Description: TagWatchman tag match mode
+ 
+  # ── SNS Topic ───────────────────────────────
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-alert"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref NotificationEmail
+ 
+  # ── IAM Role: Operator (tag-restore via switch role) ──
+  OperatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-operator"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref TrustedPrincipals
+            Action: sts:AssumeRole
+            Condition: !If
+              - HasCidrRestriction
+              - IpAddress:
+                  aws:SourceIp: !Ref OperatorAllowedCidr
+              - !Ref AWS::NoValue
+      Policies:
+        - PolicyName: TagRestoreOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutBucketTagging
+                  - s3:GetBucketTagging
+                  - dynamodb:TagResource
+                  - dynamodb:ListTagsOfResource
+                  - sqs:TagQueue
+                  - sqs:ListQueueTags
+                  - sns:TagResource
+                  - sns:ListTagsForResource
+                  - kinesis:AddTagsToStream
+                  - kinesis:ListTagsForStream
+                  - es:AddTags
+                  - es:ListTags
+                  - ecr:TagResource
+                  - ecr:ListTagsForResource
+                  - states:TagResource
+                  - states:ListTagsForResource
+                  - ec2:CreateTags
+                  - rds:AddTagsToResource
+                  - lambda:TagResource
+                  - ecs:TagResource
+                  - eks:TagResource
+                  - elasticache:AddTagsToResource
+                  - redshift:CreateTags
+                  - workspaces:CreateTags
+                  - apigateway:PUT
+                  - apigateway:GET
+                Resource: "*"
+ 
+  # ── IAM Role for Lambda ──────────────────────
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TagWatchmanPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["tag:GetResources"]
+                Resource: "*"
+              - Effect: Allow
+                Action: ["ssm:GetParameter"]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/tagwatchman/*"
+              - Effect: Allow
+                Action: ["states:StartExecution"]
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-auto-delete"
+              - Effect: Allow
+                Action: ["sns:Publish"]
+                Resource: !Ref AlertTopic
+              - Effect: Allow
+                Action: ["lambda:InvokeFunction"]
+                Resource: "*"
+              - Effect: Allow
+                Action: ["sts:GetCallerIdentity"]
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeTags
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:CreateSecurityGroup
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:DeleteSecurityGroup
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:TerminateInstances
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeAddresses
+                  - ec2:ReleaseAddress
+                  - ec2:DetachInternetGateway
+                  - ec2:DeleteInternetGateway
+                  - ec2:DescribeNatGateways
+                  - ec2:DeleteNatGateway
+                  - ec2:DescribeVpcPeeringConnections
+                  - ec2:DeleteVpcPeeringConnection
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:ListTagsForResource
+                  - rds:AddTagsToResource
+                  - rds:RemoveTagsFromResource
+                  - rds:ModifyDBInstance
+                  - rds:DeleteDBInstance
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketTagging
+                  - s3:PutBucketTagging
+                  - s3:DeleteBucketTagging
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                  - s3:DeleteBucket
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConcurrency
+                  - lambda:PutFunctionConcurrency
+                  - lambda:DeleteFunctionConcurrency
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                  - lambda:DeleteFunction
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:ListTagsOfResource
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                  - dynamodb:PutResourcePolicy
+                  - dynamodb:DeleteResourcePolicy
+                  - dynamodb:GetResourcePolicy
+                  - dynamodb:DeleteTable
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:ListTagsForResource
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                  - ecs:UpdateService
+                  - ecs:DeleteService
+                  - ecs:DeleteCluster
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                  - eks:ListTagsForResource
+                  - eks:TagResource
+                  - eks:UntagResource
+                  - eks:UpdateClusterConfig
+                  - eks:DeleteCluster
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                  - sqs:SetQueueAttributes
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                  - sqs:DeleteQueue
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:GetTopicAttributes
+                  - sns:SetTopicAttributes
+                  - sns:TagResource
+                  - sns:UntagResource
+                  - sns:DeleteTopic
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kinesis:PutResourcePolicy
+                  - kinesis:DeleteResourcePolicy
+                  - kinesis:AddTagsToStream
+                  - kinesis:RemoveTagsFromStream
+                  - kinesis:DeleteStream
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - elasticache:DescribeReplicationGroups
+                  - elasticache:DescribeCacheClusters
+                  - elasticache:DescribeCacheSubnetGroups
+                  - elasticache:ModifyReplicationGroup
+                  - elasticache:AddTagsToResource
+                  - elasticache:RemoveTagsFromResource
+                  - elasticache:ListTagsForResource
+                  - elasticache:DeleteReplicationGroup
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - es:UpdateElasticsearchDomainConfig
+                  - es:DescribeElasticsearchDomainConfig
+                  - es:AddTags
+                  - es:RemoveTags
+                  - es:ListTags
+                  - es:DeleteElasticsearchDomain
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:GetRepositoryPolicy
+                  - ecr:SetRepositoryPolicy
+                  - ecr:DeleteRepositoryPolicy
+                  - ecr:TagResource
+                  - ecr:UntagResource
+                  - ecr:ListTagsForResource
+                  - ecr:DeleteRepository
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - redshift:DescribeClusters
+                  - redshift:DescribeClusterSubnetGroups
+                  - redshift:DescribeTags
+                  - redshift:CreateTags
+                  - redshift:DeleteTags
+                  - redshift:ModifyCluster
+                  - redshift:DeleteCluster
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - states:DescribeStateMachine
+                  - states:ListTagsForResource
+                  - states:TagResource
+                  - states:UntagResource
+                  - states:SetResourcePolicy
+                  - states:DeleteResourcePolicy
+                  - states:DeleteStateMachine
+                  - states:DescribeExecution
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - workspaces:DescribeWorkspaces
+                  - workspaces:DescribeWorkspaceDirectories
+                  - workspaces:CreateTags
+                  - workspaces:DeleteTags
+                  - workspaces:TerminateWorkspaces
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - glue:DeleteDatabase
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:DELETE
+                  - apigateway:PATCH
+                  - apigateway:POST
+                  - apigateway:PUT
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:ListInstanceProfilesForRole
+                  - iam:ListRoleTags
+                  - iam:DetachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:DeleteRole
+                  - iam:GetUser
+                  - iam:ListAttachedUserPolicies
+                  - iam:ListUserPolicies
+                  - iam:ListAccessKeys
+                  - iam:ListMFADevices
+                  - iam:ListUserTags
+                  - iam:ListGroupsForUser
+                  - iam:DetachUserPolicy
+                  - iam:DeleteUserPolicy
+                  - iam:UpdateAccessKey
+                  - iam:DeleteAccessKey
+                  - iam:DeactivateMFADevice
+                  - iam:DeleteVirtualMFADevice
+                  - iam:RemoveUserFromGroup
+                  - iam:TagUser
+                  - iam:UntagUser
+                  - iam:DeleteUser
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudfront:ListTagsForResource
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudtrail:StartLogging
+                  - cloudtrail:GetTrailStatus
+                  - cloudtrail:DescribeTrails
+                Resource: "*"
+ 
+  # ── IAM Role for Step Functions ──────────────
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-sfn-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt IsolatorFunction.Arn
+                  - !GetAtt NotifierFunction.Arn
+                  - !GetAtt RecheckFunction.Arn
+              - Effect: Allow
+                Action: kinesis:ListTagsForStream
+                Resource: !Sub "arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/*"
+ 
+  # ── Lambda: Detector ─────────────────────────
+  DetectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-detector"
+      CodeUri: lambda/detector/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-auto-delete"
+          DELETE_DELAY_SECONDS: !Ref DeleteDelaySeconds
+      Events:
+        AllCloudTrailEvents:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              detail-type: ["AWS API Call via CloudTrail"]
+              detail:
+                errorCode:
+                  - exists: false
+ 
+  # ── Lambda: Isolator ─────────────────────────
+  IsolatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-isolator"
+      CodeUri: lambda/isolator/
+      Handler: index.lambda_handler
+      Timeout: 60
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          DRY_RUN: !Ref DryRun
+          OPERATOR_ROLE_ARN: !GetAtt OperatorRole.Arn
+          LAMBDA_ROLE_ARN: !GetAtt LambdaRole.Arn
+ 
+  # ── Lambda: Notifier ─────────────────────────
+  NotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-notifier"
+      CodeUri: lambda/notifier/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref AlertTopic
+          DELETE_DELAY_SECONDS: !Ref DeleteDelaySeconds
+          APPROVAL_BASE_URL: !Sub "https://${ApprovalApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+ 
+  # ── Lambda: Recheck ──────────────────────────
+  RecheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-recheck"
+      CodeUri: lambda/recheck/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          RESTORER_FUNCTION_ARN: !GetAtt RestorerFunction.Arn
+ 
+  # ── Lambda: Restorer ─────────────────────────
+  RestorerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-restorer"
+      CodeUri: lambda/restorer/
+      Handler: index.lambda_handler
+      Timeout: 60
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          DRY_RUN: !Ref DryRun
+ 
+  # ── Lambda: Approver ─────────────────────────
+  ApproverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-approver"
+      CodeUri: lambda/approver/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          DELETER_FUNCTION_ARN: !GetAtt DeleterFunction.Arn
+          STATE_MACHINE_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-auto-delete"
+      Events:
+        ApproveGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApprovalApi
+            Path: /approve
+            Method: GET
+ 
+  # ── Lambda: Deleter ──────────────────────────
+  DeleterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-deleter"
+      CodeUri: lambda/deleter/
+      Handler: index.lambda_handler
+      Timeout: 60
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          DRY_RUN: !Ref DryRun
+          SNS_TOPIC_ARN: !Ref AlertTopic
+          OPERATOR_ROLE_ARN: !GetAtt OperatorRole.Arn
+          LAMBDA_ROLE_ARN: !GetAtt LambdaRole.Arn
+ 
+  # ── Lambda: CloudTrail Guardian ──────────────
+  CloudTrailGuardianFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-cloudtrail-guardian"
+      CodeUri: lambda/cloudtrail-guardian/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref AlertTopic
+      Events:
+        CloudTrailEvents:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: ["aws.cloudtrail"]
+              detail-type: ["AWS API Call via CloudTrail"]
+              detail:
+                eventName:
+                  - StopLogging
+                  - DeleteTrail
+                  - UpdateTrail
+                  - PutEventSelectors
+ 
+  # ── API Gateway ──────────────────────────────
+  ApprovalApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-approval-api"
+      StageName: prod
+ 
+  # ── Step Functions ───────────────────────────
+  AutoDeleteStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-auto-delete"
+      RoleArn: !GetAtt StateMachineRole.Arn
+      DefinitionSubstitutions:
+        NotifierArn: !GetAtt NotifierFunction.Arn
+        RecheckArn: !GetAtt RecheckFunction.Arn
+        LateTagWaitSeconds: !Ref LateTagWaitSeconds
+      DefinitionString: !Sub
+        - |
+          {
+            "Comment": "TagWatchman: detect -> isolate -> notify -> wait -> recheck -> approve -> delete",
+            "StartAt": "CheckRaceProne",
+            "States": {
+              "CheckRaceProne": {
+                "Type": "Choice",
+                "Comment": "late-tag レース対象(現状 Kinesis CreateStream のみ)を分岐。Restore 含む他は全て従来 Isolate へ素通り。",
+                "Choices": [
+                  {
+                    "Variable": "$.eventName",
+                    "StringEquals": "CreateStream",
+                    "Next": "WaitForLateTag"
+                  }
+                ],
+                "Default": "Isolate"
+              },
+              "WaitForLateTag": {
+                "Type": "Wait",
+                "Comment": "作成->ACTIVE->タグ付けの構造ギャップ(実測13sフラット)を吸収。単発・ループなし。",
+                "Seconds": ${LateTagWaitSeconds},
+                "Next": "ReadKinesisTags"
+              },
+              "ReadKinesisTags": {
+                "Type": "Task",
+                "Comment": "Lambda を介さず SM ネイティブ統合でタグ直読み。反映ラグ0s実証済。",
+                "Resource": "arn:aws:states:::aws-sdk:kinesis:listTagsForStream",
+                "Parameters": {
+                  "StreamARN.$": "$.arn"
+                },
+                "ResultSelector": {
+                  "keys.$": "$.Tags[*].Key"
+                },
+                "ResultPath": "$.lateTag",
+                "Catch": [
+                  {
+                    "ErrorEquals": ["States.ALL"],
+                    "Comment": "読み取り失敗はフェイルセーフで隔離側に倒す(タグ未確認=危険側)。",
+                    "ResultPath": "$.lateTagError",
+                    "Next": "Isolate"
+                  }
+                ],
+                "Next": "ComputeTagPresence"
+              },
+              "ComputeTagPresence": {
+                "Type": "Pass",
+                "Comment": "必須3キー(Env/Project/Owned)は製品固定方針につきハードコード許容。値の妥当性は見ず存在のみ判定(値検証は通常検知のtag_validatorが担当)。キー名が可変要件化したらLambda退避を検討。",
+                "Parameters": {
+                  "hasEnv.$": "States.ArrayContains($.lateTag.keys, 'Env')",
+                  "hasProject.$": "States.ArrayContains($.lateTag.keys, 'Project')",
+                  "hasOwned.$": "States.ArrayContains($.lateTag.keys, 'Owned')"
+                },
+                "ResultPath": "$.tagCheck",
+                "Next": "LateTagResult"
+              },
+              "LateTagResult": {
+                "Type": "Choice",
+                "Comment": "3キー全部揃った->隔離せず正常終了。1つでも欠け->従来 Isolate。",
+                "Choices": [
+                  {
+                    "And": [
+                      {"Variable": "$.tagCheck.hasEnv",     "BooleanEquals": true},
+                      {"Variable": "$.tagCheck.hasProject", "BooleanEquals": true},
+                      {"Variable": "$.tagCheck.hasOwned",   "BooleanEquals": true}
+                    ],
+                    "Next": "LateTagResolved"
+                  }
+                ],
+                "Default": "Isolate"
+              },
+              "LateTagResolved": {
+                "Type": "Succeed",
+                "Comment": "Wait 中に必須タグが揃った=正規の作成フローだった。隔離せず終了。"
+              },
+              "Isolate": {
+                "Type": "Task",
+                "Resource": "${IsolatorArn}",
+                "ResultPath": "$.isolation",
+                "Retry": [
+                  {
+                    "ErrorEquals": [
+                      "InvalidReplicationGroupStateFault",
+                      "InvalidClusterStateFault",
+                      "InvalidDBInstanceStateFault",
+                      "InvalidRequestException",
+                      "OpenSearchChangeInProgressError"
+                    ],
+                    "IntervalSeconds": 120,
+                    "MaxAttempts": 30,
+                    "BackoffRate": 1.0
+                  }
+                ],
+                "Catch": [
+                  {
+                    "ErrorEquals": ["States.ALL"],
+                    "ResultPath": "$.isolationError",
+                    "Next": "NotifyDetection"
+                  }
+                ],
+                "Next": "NotifyDetectionIsolated"
+              },
+              "NotifyDetectionIsolated": {
+                "Type": "Task",
+                "Resource": "${NotifierArn}",
+                "Parameters": {
+                  "mailType": "detection",
+                  "arn.$": "$.arn",
+                  "missingTags.$": "$.missingTags",
+                  "requiredTags.$": "$.requiredTags",
+                  "principal.$": "$.principal",
+                  "region.$": "$.region",
+                  "eventName.$": "$.eventName",
+                  "isolation.$": "$.isolation"
+                },
+                "ResultPath": null,
+                "Next": "CheckPostNotifyFlow"
+              },
+              "CheckPostNotifyFlow": {
+                "Type": "Choice",
+                "Comment": "後続フロー不要な status は猶予期間に進まず終了。manual_review / isolation_failed は意図的に Wait へ進み7日猶予→承認の経路を維持。",
+                "Choices": [
+                  {
+                    "Variable": "$.isolation.isolationStatus",
+                    "StringEquals": "notify_only",
+                    "Next": "NoFurtherAction"
+                  },
+                  {
+                    "Variable": "$.isolation.isolationStatus",
+                    "StringEquals": "network_immediate_delete",
+                    "Next": "NoFurtherAction"
+                  },
+                  {
+                    "Variable": "$.isolation.isolationStatus",
+                    "StringEquals": "skipped",
+                    "Next": "NoFurtherAction"
+                  },
+                  {
+                    "Variable": "$.isolation.isolationStatus",
+                    "StringEquals": "self_protected",
+                    "Next": "NoFurtherAction"
+                  }
+                ],
+                "Default": "Wait"
+              },
+              "NoFurtherAction": {
+                "Type": "Succeed",
+                "Comment": "通知のみ/即時削除済み/skip/自己保全。猶予期間・承認フロー不要。"
+              },
+              "NotifyDetection": {
+                "Type": "Task",
+                "Resource": "${NotifierArn}",
+                "Parameters": {
+                  "mailType": "detection",
+                  "arn.$": "$.arn",
+                  "missingTags.$": "$.missingTags",
+                  "requiredTags.$": "$.requiredTags",
+                  "principal.$": "$.principal",
+                  "region.$": "$.region",
+                  "eventName.$": "$.eventName",
+                  "isolation": {"isolationStatus": "isolation_failed"}
+                },
+                "ResultPath": null,
+                "Next": "Wait"
+              },
+              "Wait": {
+                "Type": "Wait",
+                "SecondsPath": "$.waitSeconds",
+                "Next": "RecheckTags"
+              },
+              "RecheckTags": {
+                "Type": "Task",
+                "Resource": "${RecheckArn}",
+                "Next": "ShouldDelete"
+              },
+              "ShouldDelete": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.stillMissingTags",
+                    "BooleanEquals": true,
+                    "Next": "NotifyApproval"
+                  }
+                ],
+                "Default": "Cancelled"
+              },
+              "NotifyApproval": {
+                "Type": "Task",
+                "Resource": "${NotifierArn}",
+                "Parameters": {
+                  "mailType": "approval",
+                  "arn.$": "$.arn",
+                  "missingTags.$": "$.missingTags",
+                  "requiredTags.$": "$.requiredTags",
+                  "principal.$": "$.principal",
+                  "region.$": "$.region",
+                  "executionId.$": "$$.Execution.Name"
+                },
+                "ResultPath": null,
+                "Next": "WaitForApproval"
+              },
+              "WaitForApproval": {
+                "Type": "Wait",
+                "Seconds": 2592000,
+                "Next": "Timeout"
+              },
+              "Timeout": {
+                "Type": "Succeed"
+              },
+              "Cancelled": {
+                "Type": "Succeed"
+              }
+            }
+          }
+        - IsolatorArn: !GetAtt IsolatorFunction.Arn
+          NotifierArn: !GetAtt NotifierFunction.Arn
+          RecheckArn: !GetAtt RecheckFunction.Arn
+ 
+Outputs:
+  StateMachineArn:
+    Value: !Ref AutoDeleteStateMachine
+  SnsTopicArn:
+    Value: !Ref AlertTopic
+  ApprovalApiUrl:
+    Value: !Sub "https://${ApprovalApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  DetectorFunctionArn:
+    Value: !GetAtt DetectorFunction.Arn
+  CloudTrailGuardianFunctionArn:
+    Value: !GetAtt CloudTrailGuardianFunction.Arn
+  OperatorRoleArn:
+    Description: Role to assume (switch role) when adding tags to quarantined resources
+    Value: !GetAtt OperatorRole.Arn

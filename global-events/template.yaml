@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  tagwatchman-global-events (us-east-1): IAM 等グローバル CloudTrail イベント
+  (CreateRole/CreateUser) を core スタックの default bus (CoreRegion) へ転送する。
+  core スタック・lambda コード・SM・isolator は一切変更しない。
+
+Parameters:
+  CoreRegion:
+    Type: String
+    Default: ap-northeast-1
+    Description: core スタック(detector)が居るリージョン=転送先 default bus のリージョン。
+
+Resources:
+  # EventBridge が宛先 default bus へ PutEvents するために assume するロール
+  CrossRegionForwardRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-forward-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PutEventsToCoreBus
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: events:PutEvents
+                Resource: !Sub "arn:${AWS::Partition}:events:${CoreRegion}:${AWS::AccountId}:event-bus/default"
+
+  # us-east-1 default bus 上のルール: IAM CreateRole/CreateUser を拾い core bus へ転送
+  IamGlobalEventForwardRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${AWS::StackName}-iam-global-forward"
+      Description: Forward IAM CreateRole/CreateUser to core default bus.
+      EventBusName: default
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.iam
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventName:
+            - CreateRole
+            - CreateUser
+          errorCode:
+            - exists: false
+      Targets:
+        - Id: CoreDefaultBus
+          Arn: !Sub "arn:${AWS::Partition}:events:${CoreRegion}:${AWS::AccountId}:event-bus/default"
+          RoleArn: !GetAtt CrossRegionForwardRole.Arn
+
+  # us-east-1 default bus 上のルール: CloudFront CreateDistribution(WithTags) を拾い core bus へ転送
+  CloudFrontGlobalEventForwardRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${AWS::StackName}-cloudfront-global-forward"
+      Description: Forward CloudFront CreateDistribution/CreateDistributionWithTags to core default bus.
+      EventBusName: default
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.cloudfront
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventName:
+            - CreateDistribution
+            - CreateDistributionWithTags
+          errorCode:
+            - exists: false
+      Targets:
+        - Id: CoreDefaultBus
+          Arn: !Sub "arn:${AWS::Partition}:events:${CoreRegion}:${AWS::AccountId}:event-bus/default"
+          RoleArn: !GetAtt CrossRegionForwardRole.Arn  
+          
+Outputs:
+  ForwardRoleArn:
+    Value: !GetAtt CrossRegionForwardRole.Arn
+  RuleName:
+    Value: !Ref IamGlobalEventForwardRule
+  CloudFrontRuleName:
+    Value: !Ref CloudFrontGlobalEventForwardRule

@@ -859,7 +859,10 @@ class TestIsolatorSelfProtection:
         mock_iam.list_role_policies.return_value = {"PolicyNames": []}
         with patch.object(iso.boto3, "client", return_value=mock_iam):
             iso._isolate_iam_role("arn:aws:iam::123456789012:role/some-customer-role", "ap-northeast-1")
-        mock_iam.list_attached_role_policies.assert_called_once()
+        # v33 の lossy 保全（_capture_iam_policies）が剥奪前に list_attached_role_policies を
+        # 1回読み、その後の detach ループでもう1回読むため計2回。回数は固定せず「ガードが止めず
+        # 剥奪が走った」ことだけ担保する（将来 capture が取得済みリストを再利用しても壊れない）。
+        mock_iam.list_attached_role_policies.assert_called()
         mock_iam.tag_role.assert_called_once()
 
 

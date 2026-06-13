@@ -379,6 +379,7 @@ Resources:
                   - iam:GetRole
                   - iam:ListAttachedRolePolicies
                   - iam:ListRolePolicies
+                  - iam:GetRolePolicy
                   - iam:ListInstanceProfilesForRole
                   - iam:ListRoleTags
                   - iam:DetachRolePolicy
@@ -390,6 +391,7 @@ Resources:
                   - iam:GetUser
                   - iam:ListAttachedUserPolicies
                   - iam:ListUserPolicies
+                  - iam:GetUserPolicy
                   - iam:ListAccessKeys
                   - iam:ListMFADevices
                   - iam:ListUserTags

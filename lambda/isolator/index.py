@@ -1102,6 +1102,52 @@ def _isolate_vpc_peering(arn: str, region: str):
  
  
 # ─────────────────────────────────────────────────────────────
+# IAM 隔離 共通ヘルパー
+# ─────────────────────────────────────────────────────────────
+
+def _capture_iam_policies(iam, *, role_name=None, user_name=None):
+    """剥奪前に managed ARN 一覧・インライン本文・(User のみ)アクセスキーを退避し、
+    復旧用の人間可読テキストを body として返す。自動復旧はしない（材料の提供のみ）。"""
+    lines = []
+    captured = False
+
+    if role_name:
+        attached = iam.list_attached_role_policies(RoleName=role_name).get("AttachedPolicies", [])
+        inline_names = iam.list_role_policies(RoleName=role_name).get("PolicyNames", [])
+    else:
+        attached = iam.list_attached_user_policies(UserName=user_name).get("AttachedPolicies", [])
+        inline_names = iam.list_user_policies(UserName=user_name).get("PolicyNames", [])
+
+    if attached:
+        captured = True
+        lines.append("[マネージドポリシー（再アタッチで復元可）]")
+        for p in attached:
+            lines.append(f"  - {p['PolicyArn']}")
+
+    if inline_names:
+        captured = True
+        lines.append("[インラインポリシー（削除されます・本文から再作成してください）]")
+        for name in inline_names:
+            if role_name:
+                doc = iam.get_role_policy(RoleName=role_name, PolicyName=name)["PolicyDocument"]
+            else:
+                doc = iam.get_user_policy(UserName=user_name, PolicyName=name)["PolicyDocument"]
+            body = json.dumps(doc, ensure_ascii=False, separators=(",", ":"))
+            lines.append(f"  - {name}:")
+            lines.append(f"    {body}")
+
+    if user_name:
+        keys = iam.list_access_keys(UserName=user_name).get("AccessKeyMetadata", [])
+        if keys:
+            captured = True
+            lines.append("[無効化したアクセスキー（必要なら再有効化してください）]")
+            for k in keys:
+                lines.append(f"  - {k['AccessKeyId']}")
+
+    return captured, "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────
 # IAM Role 隔離（ポリシーを全剥奪）
 # ─────────────────────────────────────────────────────────────
  
@@ -1111,27 +1157,30 @@ def _isolate_iam_role(arn: str, region: str):
         return
     _iam      = boto3.client("iam")
     role_name = arn.split("/")[-1]
- 
+
+    # 剥奪前にオリジナルを退避（復旧材料の提供のみ・自動復旧はしない）
+    had, body = _capture_iam_policies(_iam, role_name=role_name)
+
     # アタッチ済みマネージドポリシーを全剥奪
     attached = _iam.list_attached_role_policies(RoleName=role_name)
     for policy in attached.get("AttachedPolicies", []):
         _iam.detach_role_policy(RoleName=role_name, PolicyArn=policy["PolicyArn"])
         logger.info("Detached policy %s from role %s", policy["PolicyArn"], role_name)
- 
+
     # インラインポリシーを全削除
     inline = _iam.list_role_policies(RoleName=role_name)
     for policy_name in inline.get("PolicyNames", []):
         _iam.delete_role_policy(RoleName=role_name, PolicyName=policy_name)
         logger.info("Deleted inline policy %s from role %s", policy_name, role_name)
- 
+
     # タグに記録
     _iam.tag_role(
         RoleName=role_name,
         Tags=[{"Key": TAG_QUARANTINED, "Value": "true"}],
     )
- 
+
     logger.info("IAM Role %s isolated — all policies detached", role_name)
-    return {"isolationStatus": "permissions_revoked"}
+    return {"isolationStatus": "permissions_revoked", "had": had, "body": body}
  
  
 # ─────────────────────────────────────────────────────────────
@@ -1144,19 +1193,22 @@ def _isolate_iam_user(arn: str, region: str):
         return
     _iam      = boto3.client("iam")
     user_name = arn.split("/")[-1]
- 
+
+    # 剥奪前にオリジナルを退避（復旧材料の提供のみ・自動復旧はしない）
+    had, body = _capture_iam_policies(_iam, user_name=user_name)
+
     # アタッチ済みマネージドポリシーを全剥奪
     attached = _iam.list_attached_user_policies(UserName=user_name)
     for policy in attached.get("AttachedPolicies", []):
         _iam.detach_user_policy(UserName=user_name, PolicyArn=policy["PolicyArn"])
         logger.info("Detached policy %s from user %s", policy["PolicyArn"], user_name)
- 
+
     # インラインポリシーを全削除
     inline = _iam.list_user_policies(UserName=user_name)
     for policy_name in inline.get("PolicyNames", []):
         _iam.delete_user_policy(UserName=user_name, PolicyName=policy_name)
         logger.info("Deleted inline policy %s from user %s", policy_name, user_name)
- 
+
     # アクセスキーを全て無効化
     keys = _iam.list_access_keys(UserName=user_name)
     for key in keys.get("AccessKeyMetadata", []):
@@ -1166,15 +1218,15 @@ def _isolate_iam_user(arn: str, region: str):
             Status="Inactive",
         )
         logger.info("Deactivated access key %s for user %s", key["AccessKeyId"], user_name)
- 
+
     # タグに記録
     _iam.tag_user(
         UserName=user_name,
         Tags=[{"Key": TAG_QUARANTINED, "Value": "true"}],
     )
- 
+
     logger.info("IAM User %s isolated — policies detached, keys deactivated", user_name)
-    return {"isolationStatus": "permissions_revoked"}
+    return {"isolationStatus": "permissions_revoked", "had": had, "body": body}
  
  
 # ─────────────────────────────────────────────────────────────

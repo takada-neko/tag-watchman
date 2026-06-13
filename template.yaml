@@ -581,6 +581,8 @@ Resources:
               source: ["aws.cloudtrail"]
               detail-type: ["AWS API Call via CloudTrail"]
               detail:
+                errorCode:
+                  - exists: false
                 eventName:
                   - StopLogging
                   - DeleteTrail

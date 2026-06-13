@@ -85,7 +85,11 @@ PutEventSelectors → ⚠️ WARNING警告メール
 | 監査 | CloudTrail | 専用フロー（自動再有効化） | — |
  
 **監視対象外:** Transit Gateway / Direct Connect（物理接続・基幹ネットワークに関わるため対象外としています）
- 
+
+
+> **※ リソースポリシーで隔離するサービス（S3 / DynamoDB / SQS / SNS / ECR / OpenSearch）の復旧について**
+> タグを付与すると隔離は解除され、リソースは再び利用可能になります。ただし隔離前に**独自のリソースポリシーを設定していた場合、その元のポリシーは自動では復元されません**（隔離時に拒否ポリシーへ置き換えるため）。元ポリシーの全文は検知メールに記載されるので、必要なら手動で再適用してください。独自ポリシーを設定していなかったリソースは、そのまま元の状態に戻ります。
+
 > **※ IAM Role / IAM User / CloudFront の検知には、クイックスタート手順2のグローバルイベント転送スタック（us-east-1）の導入が必要です。**
  
 👉 [リソース別の挙動詳細はこちら](docs/resource_behavior.md)
@@ -224,15 +228,21 @@ sam delete --stack-name tagwatchman-global-events --region us-east-1
 ---
  
 ## 設定のカスタマイズ
- 
-タグの判定ルール・猶予期間などは **AWS Systems Manager Parameter Store** から変更できます。再デプロイ不要です。
- 
+
+タグの**判定ルール**（必須タグ・許可値・マッチ方式）は **AWS Systems Manager Parameter Store** から変更でき、再デプロイ不要で即時反映されます。
+
 | パラメータ名 | デフォルト | 説明 |
 |---|---|---|
-| `/tagwatchman/required-tags` | `Env,Project,Owned` | 必須タグキー |
-| `/tagwatchman/delete-delay-seconds` | `604800`（7日） | 猶予期間（秒） |
-| `/tagwatchman/dry-run` | `false` | trueにすると削除しない |
- 
+| `/tagwatchman/required-tags` | `Env,Project,Owned` | 必須タグキー（カンマ区切り） |
+| `/tagwatchman/tag-allowed-values` | `Env:prod\|stg\|test,Project:your-project-name` | キーごとの許可値（`\|` 区切り） |
+| `/tagwatchman/tag-match-mode` | `Env:exact,Project:prefix` | マッチ方式（`exact`=完全一致 / `prefix`=前方一致） |
+
+> **💡 DryRun と猶予期間はデプロイパラメータです（Parameter Store では変更できません）。**  
+> `DryRun` と `DeleteDelaySeconds` は CloudFormation パラメータ（Lambda の環境変数）です。変更するには再デプロイが必要です：
+> ```bash
+> sam deploy --parameter-overrides DryRun=false DeleteDelaySeconds=604800
+> ```
+
 > タグ設計の考え方や許可値の具体的な決め方など、より実践的な解説は上位版ドキュメントで提供しています。
  
 ---

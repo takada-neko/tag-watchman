@@ -125,6 +125,15 @@ def _send_detection_mail(event: dict):
             f"  タグが付与されない場合、{delay_days}日後に削除承認メールが送信されます。",
         ])
     elif iso_status == "permissions_revoked" or (iso_status is None and is_iam):
+        recovery_lines = []
+        if lost.get("had") and lost.get("body"):
+            recovery_lines = [
+                "",
+                "【剥奪した権限（復旧用・自動復旧はされません）】",
+                "  以下は隔離前に付与されていた内容です。手動復旧の際に参照してください。",
+                "",
+                lost.get("body", ""),
+            ]
         isolation_note = "\n".join([
             "【自動対応済み】",
             "  ・アタッチ済みポリシーをすべて剥奪しました",
@@ -136,6 +145,7 @@ def _send_detection_mail(event: dict):
             "  1. 必須タグを付与する",
             "  2. 必要なポリシーを再アタッチする",
             "  3. 必要なアクセスキーを再作成・有効化する",
+            *recovery_lines,
             "",
             f"  タグが付与されない場合、{delay_days}日後に削除承認メールが送信されます。",
         ])

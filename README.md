@@ -250,7 +250,8 @@ sam delete --stack-name tagwatchman-global-events --region us-east-1
 ## アーキテクチャ
  
 <img height="800" alt="image" src="https://github.com/user-attachments/assets/0c03b2e1-b968-4ba9-b907-f2ace73e7efc" />
----
+
+※グローバルサービス転送スタックは省略
  
 ## 料金
  

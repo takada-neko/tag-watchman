@@ -1,3 +1,4 @@
+[English](README.en.md) | **日本語**
 # 🔒 TagWatchman — AWS Untagged Resource Auto-Isolator
  
 **タグのないAWSリソースをリアルタイムで検知・隔離・削除する、CloudFormationデプロイ型エージェント**

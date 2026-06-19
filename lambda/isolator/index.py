@@ -175,6 +175,7 @@ s3  = boto3.client("s3")
 TAG_QUARANTINED          = "tagwatchman:quarantined"
 TAG_ORIGINAL_SGS         = "tagwatchman:original-sgs"
 TAG_ORIGINAL_POLICY      = "tagwatchman:had-bucket-policy"
+TAG_HAD_RESOURCE_POLICY  = "tagwatchman:had-resource-policy"  # S3以外の5サービス共通
 TAG_ORIGINAL_CONCURRENCY = "tagwatchman:original-concurrency"
 TAG_APIGW_STAGES         = "tagwatchman:original-stages"
 TAG_POLICY_SHA256        = "tagwatchman:original-policy-sha256"
@@ -334,6 +335,26 @@ def _policy_summary_b64(policy_json: str) -> str:
         summary = {"err": "unparsable"}
     raw = json.dumps(summary, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(raw).decode("ascii")
+
+
+def _policy_trace_pairs(had_policy: bool, original_policy: Optional[str]) -> list:
+    """リソースポリシー系（S3以外の5サービス）の痕跡タグを (Key, Value) 列で返す。
+
+    _isolate_s3 と同じ情報を、サービス非依存の中立キーで付与する。
+    - 有無フラグ(had-resource-policy)は常に付与。S3専用の had-bucket-policy とは別キー。
+    - ポリシーがあった時だけ sha256 / isolated-at / summary を追加（本文の正本はメール）。
+    痕跡はどの Lambda も機械的に読まない（フォレンジック専用）。
+    """
+    pairs = [(TAG_HAD_RESOURCE_POLICY, str(bool(had_policy)))]
+    if had_policy and original_policy:
+        sha = hashlib.sha256(original_policy.encode("utf-8")).hexdigest()
+        isolated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        pairs += [
+            (TAG_POLICY_SHA256,      sha),
+            (TAG_POLICY_ISOLATED_AT, isolated_at),
+            (TAG_POLICY_SUMMARY_B64, _policy_summary_b64(original_policy)),
+        ]
+    return pairs
 
 
 def _isolate_s3(arn: str, region: str):
@@ -525,7 +546,9 @@ def _isolate_dynamodb(arn: str, region: str):
     table_name = arn.split("/")[-1]
     _dynamodb.tag_resource(
         ResourceArn=arn,
-        Tags=[{"Key": TAG_QUARANTINED, "Value": "true"}],
+        Tags=[{"Key": TAG_QUARANTINED, "Value": "true"},
+              *({"Key": k, "Value": v}
+                for k, v in _policy_trace_pairs(had_policy, original_policy))],
     )
 
     logger.info("DynamoDB table %s isolated. Had existing policy: %s", table_name, had_policy)
@@ -609,7 +632,9 @@ def _isolate_sqs(arn: str, region: str):
         Attributes={"Policy": deny_policy},
     )
 
-    _sqs.tag_queue(QueueUrl=url, Tags={TAG_QUARANTINED: "true"})
+    _sqs_tags = {TAG_QUARANTINED: "true"}
+    _sqs_tags.update(dict(_policy_trace_pairs(had_policy, original_policy)))
+    _sqs.tag_queue(QueueUrl=url, Tags=_sqs_tags)
     logger.info("SQS queue %s isolated (%d deny statements). Had existing policy: %s",
                 queue_name, len(statements), had_policy)
     trace = {"had": False, "body": ""}
@@ -786,7 +811,9 @@ def _isolate_sns(arn: str, region: str):
 
     _sns.tag_resource(
         ResourceArn=arn,
-        Tags=[{"Key": TAG_QUARANTINED, "Value": "true"}],
+        Tags=[{"Key": TAG_QUARANTINED, "Value": "true"},
+              *({"Key": k, "Value": v}
+                for k, v in _policy_trace_pairs(had_policy, original_policy))],
     )
 
     logger.info("SNS topic %s isolated. Had existing policy: %s",
@@ -879,7 +906,9 @@ def _isolate_opensearch(arn: str, region: str):
 
     _es.add_tags(
         ARN=arn,
-        TagList=[{"Key": TAG_QUARANTINED, "Value": "true"}],
+        TagList=[{"Key": TAG_QUARANTINED, "Value": "true"},
+                 *({"Key": k, "Value": v}
+                   for k, v in _policy_trace_pairs(had_policy, original_policy))],
     )
 
     logger.info("OpenSearch domain %s isolated. Had existing policy: %s",
@@ -961,7 +990,9 @@ def _isolate_ecr(arn: str, region: str):
 
     _ecr.tag_resource(
         resourceArn=arn,
-        tags=[{"Key": TAG_QUARANTINED, "Value": "true"}],
+        tags=[{"Key": TAG_QUARANTINED, "Value": "true"},
+              *({"Key": k, "Value": v}
+                for k, v in _policy_trace_pairs(had_policy, original_policy))],
     )
 
     logger.info("ECR repository %s isolated. Had existing policy: %s",

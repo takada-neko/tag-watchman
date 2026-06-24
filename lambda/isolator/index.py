@@ -82,21 +82,24 @@ def _get_or_create_quarantine_sg(vpc_id: str, region: str) -> str:
 OPERATOR_ROLE_ARN = os.environ.get("OPERATOR_ROLE_ARN", "")
 LAMBDA_ROLE_ARN   = os.environ.get("LAMBDA_ROLE_ARN", "")
 
+# Phase 1: ポリシー本文の lossless 正本を置く DynamoDB テーブル
+POLICY_STORE_TABLE    = os.environ.get("POLICY_STORE_TABLE", "")
+POLICY_STORE_TTL_DAYS = 90
+
 SELF_PROTECT_PREFIX = os.environ.get("SELF_PROTECT_PREFIX", "")
 
 
-def _is_self_protected_iam(arn: str) -> bool:
-    """
-    自スタックの IAM プリンシパル（lambda-role / operator / sfn-role 等、
-    ${StackName}- 始まり）を剥奪対象から除外する自己保全ガード。
-    IAM 以外の ARN は常に False（全 ARN に安全に呼べる）。
-    """
-    if ":role/" not in arn and ":user/" not in arn:
+def _is_self_protected(arn: str) -> bool:
+    """自スタックのリソース（${StackName}- 始まり）を検知/隔離対象から除外。
+    IAM プリンシパルに限らず、DynamoDB テーブル等あらゆる自スタックリソースを保護する。"""
+    if not SELF_PROTECT_PREFIX:
+        # 空 prefix は明示的に「何も守らない」+ warning。startswith("") が全 True
+        # （= 全リソース自己保護 = 隔離が全停止）という設定ミスの沈黙故障を防ぐ。
+        logger.warning("SELF_PROTECT_PREFIX is empty; self-protection disabled (no resource is self-protected)")
         return False
-    name = arn.rsplit("/", 1)[-1]
-    if SELF_PROTECT_PREFIX and name.startswith(SELF_PROTECT_PREFIX):
-        return True
-    return arn in {a for a in (LAMBDA_ROLE_ARN, OPERATOR_ROLE_ARN) if a}
+    last = arn.split(":")[-1]
+    name = last.split("/")[-1] if "/" in last else last
+    return name.startswith(SELF_PROTECT_PREFIX)
 
 
 def _vpc_id_from_subnet(subnet_id: str, region: str) -> str:
@@ -170,6 +173,10 @@ def _make_tagging_deny_statement(actions: list[str], resource) -> Optional[dict]
 ec2 = boto3.client("ec2")
 rds = boto3.client("rds")
 s3  = boto3.client("s3")
+
+# Phase 1: policy-store（lossless 正本）
+_ddb = boto3.resource("dynamodb")
+_policy_store = _ddb.Table(POLICY_STORE_TABLE) if POLICY_STORE_TABLE else None
  
 # 隔離状態を記録するタグキー
 TAG_QUARANTINED          = "tagwatchman:quarantined"
@@ -203,6 +210,38 @@ def _original_sgs_to_save(current_sgs, quarantine_sg_id):
 # エントリポイント
 # ─────────────────────────────────────────────────────────────
  
+def _service_of(arn: str) -> str:
+    """ARN の service フィールドを返す（restorer の put 分岐用）。
+    s3 / dynamodb / sqs / sns / ecr / es(OpenSearch) 等。"""
+    parts = arn.split(":")
+    return parts[2] if len(parts) > 2 else ""
+
+
+def _record_to_policy_store(arn, region, status, result, event):
+    """隔離リソースを policy-store に記録。
+    逆引きキー(executionArn)は had と無関係に全リソースで保存し、
+    policyBody は had=True のときだけ持たせる。
+    書き込み失敗は緩め（隔離は続行。メール副本があるため最悪 v1 へ劣化するだけ）。"""
+    if _policy_store is None:
+        return
+    item = {
+        "resourceArn":  arn,
+        "executionArn": event.get("executionArn", ""),
+        "service":      _service_of(arn),
+        "region":       region,
+        "hadPolicy":    bool(result.get("had", False)),
+        "isolatedAt":   datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ttl":          int(datetime.now(timezone.utc).timestamp()) + POLICY_STORE_TTL_DAYS * 86400,
+    }
+    if result.get("had") and result.get("body"):
+        item["policyBody"] = result["body"]
+    try:
+        _policy_store.put_item(Item=item)
+        logger.info("policy-store recorded: %s (had=%s)", arn, item["hadPolicy"])
+    except Exception as e:
+        logger.error("policy-store put failed for %s: %s (isolation continues)", arn, e)
+
+
 def lambda_handler(event, context):
     arn    = event["arn"]
     region = event.get("region", os.environ.get("AWS_REGION", "ap-northeast-1"))
@@ -214,7 +253,7 @@ def lambda_handler(event, context):
         logger.warning("No isolator for ARN: %s — skipping isolation", arn)
         return {**event, "isolationStatus": "skipped"}
 
-    if _is_self_protected_iam(arn):
+    if _is_self_protected(arn):
         logger.warning("Self-protected IAM principal, skipping isolation: %s", arn)
         return {**event, "isolationStatus": "self_protected"}
 
@@ -225,6 +264,8 @@ def lambda_handler(event, context):
     try:
         result = isolator(arn, region) or {}
         status = result.pop("isolationStatus", "isolated")
+        if status not in ("skipped", "self_protected", "dry_run"):
+            _record_to_policy_store(arn, region, status, result, event)
         return {**event, "isolationStatus": status, "lostPolicy": result}
     except ClientError as e:
         code = e.response["Error"]["Code"]
@@ -1183,7 +1224,7 @@ def _capture_iam_policies(iam, *, role_name=None, user_name=None):
 # ─────────────────────────────────────────────────────────────
  
 def _isolate_iam_role(arn: str, region: str):
-    if _is_self_protected_iam(arn):
+    if _is_self_protected(arn):
         logger.warning("Self-protected IAM role, skipping isolation: %s", arn)
         return
     _iam      = boto3.client("iam")
@@ -1219,7 +1260,7 @@ def _isolate_iam_role(arn: str, region: str):
 # ─────────────────────────────────────────────────────────────
  
 def _isolate_iam_user(arn: str, region: str):
-    if _is_self_protected_iam(arn):
+    if _is_self_protected(arn):
         logger.warning("Self-protected IAM user, skipping isolation: %s", arn)
         return
     _iam      = boto3.client("iam")

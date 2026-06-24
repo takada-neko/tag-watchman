@@ -25,6 +25,7 @@ logger.setLevel(logging.INFO)
 STATE_MACHINE_ARN   = os.environ.get("STATE_MACHINE_ARN", "")
 ACCOUNT_ID          = boto3.client("sts").get_caller_identity()["Account"]
 DEFAULT_REGION      = os.environ.get("AWS_REGION", "ap-northeast-1")
+SELF_PROTECT_PREFIX = os.environ.get("SELF_PROTECT_PREFIX", "")
 
 sfn     = boto3.client("stepfunctions")
 
@@ -337,6 +338,19 @@ RESOURCE_EXTRACTORS: dict[str, dict[str, callable]] = {
 # エントリポイント
 # ─────────────────────────────────────────────────────────────
 
+def _is_self_protected(arn: str) -> bool:
+    """自スタックのリソース（${StackName}- 始まり）を検知/隔離対象から除外。
+    IAM プリンシパルに限らず、DynamoDB テーブル等あらゆる自スタックリソースを保護する。"""
+    if not SELF_PROTECT_PREFIX:
+        # 空 prefix は明示的に「何も守らない」+ warning。startswith("") が全 True
+        # （= 全リソース自己保護 = 隔離が全停止）という設定ミスの沈黙故障を防ぐ。
+        logger.warning("SELF_PROTECT_PREFIX is empty; self-protection disabled (no resource is self-protected)")
+        return False
+    last = arn.split(":")[-1]
+    name = last.split("/")[-1] if "/" in last else last
+    return name.startswith(SELF_PROTECT_PREFIX)
+
+
 def lambda_handler(event, context):
     logger.info("Event: %s", json.dumps(event))
 
@@ -360,6 +374,11 @@ def lambda_handler(event, context):
         return {"status": "error", "reason": "arn_extraction_failed"}
 
     logger.info("Extracted ARN: %s", arn)
+
+    # 自スタックのリソースは検知対象外（自己隔離回避）
+    if _is_self_protected(arn):
+        logger.info("Self-protected resource, skipping detection: %s", arn)
+        return {"status": "self_protected", "arn": arn}
 
     # 少し待機（リソースがタグAPIに反映されるまでのラグ対策）
     time.sleep(5)

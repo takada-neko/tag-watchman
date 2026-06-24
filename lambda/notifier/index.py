@@ -106,9 +106,11 @@ def _send_detection_mail(event: dict):
 
     # 全置換系 API（put_bucket_tagging 等）を持つサービス向けの運用案内
     retag_note = "\n".join([
-        "  ※既存タグ(tagwatchman:で始まる痕跡タグ等)は削除せず保持してください。",
-        "    AWS コンソールからの追加、または CLI の場合は既存タグを取得",
-        "    してから必須タグを追加する形で付与することを推奨します。",
+    "  ※隔離中のリソースへのタグ付与は、通常ロールでは拒否されます。",
+    "    OperatorRole（出力 OperatorRoleArn）にスイッチロールしてから付与してください。",
+    "  ※既存タグ(tagwatchman:で始まる痕跡タグ等)は削除せず保持してください。",
+    "    AWS コンソールからの追加、または CLI の場合は既存タグを取得",
+    "    してから必須タグを追加する形で付与することを推奨します。",
     ])
 
     # isolationStatus に応じた専用メッセージ（status 不在時のみ regex フォールバック）

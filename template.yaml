@@ -261,6 +261,10 @@ Resources:
                 Resource: "*"
               - Effect: Allow
                 Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt PolicyStoreTable.Arn
+              - Effect: Allow
+                Action:
                   - ecs:DescribeServices
                   - ecs:ListTagsForResource
                   - ecs:TagResource
@@ -482,6 +486,7 @@ Resources:
           DRY_RUN: !Ref DryRun
           OPERATOR_ROLE_ARN: !GetAtt OperatorRole.Arn
           LAMBDA_ROLE_ARN: !GetAtt LambdaRole.Arn
+          POLICY_STORE_TABLE: !Ref PolicyStoreTable
  
   # ── Lambda: Notifier ─────────────────────────
   NotifierFunction:
@@ -544,6 +549,12 @@ Resources:
             RestApiId: !Ref ApprovalApi
             Path: /approve
             Method: GET
+        ApprovePost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApprovalApi
+            Path: /approve
+            Method: POST
  
   # ── Lambda: Deleter ──────────────────────────
   DeleterFunction:
@@ -684,6 +695,11 @@ Resources:
               "Isolate": {
                 "Type": "Task",
                 "Resource": "${IsolatorArn}",
+                "Parameters": {
+                  "arn.$": "$.arn",
+                  "region.$": "$.region",
+                  "executionArn.$": "$$.Execution.Id"
+                },
                 "ResultPath": "$.isolation",
                 "Retry": [
                   {
@@ -824,6 +840,25 @@ Resources:
           NotifierArn: !GetAtt NotifierFunction.Arn
           RecheckArn: !GetAtt RecheckFunction.Arn
  
+  # ── DynamoDB: Policy Store（lossless 正本）──────
+  PolicyStoreTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-policy-store"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: resourceArn
+          AttributeType: S
+      KeySchema:
+        - AttributeName: resourceArn
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      DeletionProtectionEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
 Outputs:
   StateMachineArn:
     Value: !Ref AutoDeleteStateMachine

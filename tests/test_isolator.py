@@ -783,7 +783,8 @@ class TestIsolatorNoExtractor:
 
 
 class TestIsolatorSelfProtection:
-    """IAM 自己保全ガード（_is_self_protected_iam と isolator skip 挙動）"""
+    """自己保全ガード（_is_self_protected と isolator skip 挙動）。
+    判定は SELF_PROTECT_PREFIX の前方一致のみ（純粋 prefix 駆動、IAM 限定でない）。"""
 
     def _reload(self, monkeypatch, prefix="tagwatchman-"):
         monkeypatch.setenv("SELF_PROTECT_PREFIX", prefix)
@@ -797,36 +798,49 @@ class TestIsolatorSelfProtection:
     # ── 判定ロジック ──
     def test_prefix_match_role(self, monkeypatch):
         iso = self._reload(monkeypatch)
-        assert iso._is_self_protected_iam("arn:aws:iam::123456789012:role/tagwatchman-lambda-role")
-        assert iso._is_self_protected_iam("arn:aws:iam::123456789012:role/tagwatchman-operator")
-        assert iso._is_self_protected_iam("arn:aws:iam::123456789012:role/tagwatchman-sfn-role")
-        assert iso._is_self_protected_iam("arn:aws:iam::999999999999:role/tagwatchman-anything")
+        assert iso._is_self_protected("arn:aws:iam::123456789012:role/tagwatchman-lambda-role")
+        assert iso._is_self_protected("arn:aws:iam::123456789012:role/tagwatchman-operator")
+        assert iso._is_self_protected("arn:aws:iam::123456789012:role/tagwatchman-sfn-role")
+        assert iso._is_self_protected("arn:aws:iam::999999999999:role/tagwatchman-anything")
 
     def test_prefix_match_user(self, monkeypatch):
         iso = self._reload(monkeypatch)
-        assert iso._is_self_protected_iam("arn:aws:iam::123456789012:user/tagwatchman-someuser")
+        assert iso._is_self_protected("arn:aws:iam::123456789012:user/tagwatchman-someuser")
 
-    def test_explicit_arn_match_outside_prefix(self, monkeypatch):
-        # prefix を外れた別スタック名でも、明示 ARN 一致なら守る
+    def test_non_matching_prefix_not_protected(self, monkeypatch):
+        # 純粋 prefix 駆動：prefix が違えば tagwatchman- リソースでも守らない。
+        # 旧「明示 ARN 一致フォールバック」廃止の固定 ＝ ARN マッチ再混入のガード。
         iso = self._reload(monkeypatch, prefix="otherstack-")
-        assert iso._is_self_protected_iam("arn:aws:iam::123456789012:role/tagwatchman-lambda-role")
-        assert iso._is_self_protected_iam("arn:aws:iam::123456789012:role/tagwatchman-operator")
+        assert not iso._is_self_protected("arn:aws:iam::123456789012:role/tagwatchman-lambda-role")
+        assert not iso._is_self_protected("arn:aws:iam::123456789012:role/tagwatchman-operator")
+        assert iso._is_self_protected("arn:aws:iam::123456789012:role/otherstack-thing")
 
     def test_non_self_role_not_protected(self, monkeypatch):
         iso = self._reload(monkeypatch)
-        assert not iso._is_self_protected_iam("arn:aws:iam::123456789012:role/some-customer-role")
-        assert not iso._is_self_protected_iam("arn:aws:iam::123456789012:user/customer-user")
+        assert not iso._is_self_protected("arn:aws:iam::123456789012:role/some-customer-role")
+        assert not iso._is_self_protected("arn:aws:iam::123456789012:user/customer-user")
 
-    def test_non_iam_arn_passthrough(self, monkeypatch):
+    def test_non_iam_self_resource_protected(self, monkeypatch):
+        # 一般化の核：IAM 以外でも prefix 一致なら守る。
+        # policy-store 自己隔離事故（DynamoDB が即 False になり隔離された）の回帰ガード。
         iso = self._reload(monkeypatch)
-        assert not iso._is_self_protected_iam("arn:aws:ec2:ap-northeast-1:123456789012:instance/i-abc")
-        assert not iso._is_self_protected_iam("arn:aws:s3:::some-bucket")
+        assert iso._is_self_protected("arn:aws:dynamodb:ap-northeast-1:123456789012:table/tagwatchman-policy-store")
+        assert iso._is_self_protected("arn:aws:sqs:ap-northeast-1:123456789012:tagwatchman-dlq")
 
-    def test_empty_prefix_falls_back_to_explicit(self, monkeypatch):
-        # SELF_PROTECT_PREFIX 未設定（空）でも明示 ARN は守る／無関係ロールは素通り
-        iso = self._reload(monkeypatch, prefix="")
-        assert iso._is_self_protected_iam("arn:aws:iam::123456789012:role/tagwatchman-lambda-role")
-        assert not iso._is_self_protected_iam("arn:aws:iam::123456789012:role/tagwatchman-sfn-role")
+    def test_non_self_arn_passthrough(self, monkeypatch):
+        iso = self._reload(monkeypatch)
+        assert not iso._is_self_protected("arn:aws:ec2:ap-northeast-1:123456789012:instance/i-abc")
+        assert not iso._is_self_protected("arn:aws:s3:::some-bucket")
+
+    def test_empty_prefix_disables_protection(self, monkeypatch, caplog):
+        # 決定1: 空 prefix は「明示的に False（何も守らない）+ warning」。
+        # startswith("") の全 True（= 隔離が全停止）という設定ミスの沈黙故障を防ぐ。
+        import logging
+        with caplog.at_level(logging.WARNING):
+            iso = self._reload(monkeypatch, prefix="")
+            assert iso._is_self_protected("arn:aws:iam::123456789012:role/tagwatchman-lambda-role") is False
+            assert iso._is_self_protected("arn:aws:iam::123456789012:role/tagwatchman-sfn-role") is False
+        assert any("SELF_PROTECT_PREFIX" in r.getMessage() for r in caplog.records)
 
     # ── skip 挙動（剥奪 API を一切呼ばない）──
     def test_isolate_iam_role_skips_self(self, monkeypatch):

@@ -321,18 +321,18 @@ class TestApprover:
         assert result["statusCode"] == 400
 
     def test_invalid_token_returns_410(self):
-        """無効なトークン → 410"""
+        """無効なトークン → 410（POST 経路）"""
         import importlib
         import approver.index as approver
         importlib.reload(approver)
 
         with patch("approver.index._validate_token", return_value=(False, {})):
-            event = {"queryStringParameters": {"token": "invalid", "arn": "arn:aws:s3:::test"}}
+            event = {"httpMethod": "POST", "queryStringParameters": {"token": "invalid", "arn": "arn:aws:s3:::test"}}
             result = approver.lambda_handler(event, {})
             assert result["statusCode"] == 410
 
     def test_valid_token_triggers_deletion(self):
-        """有効なトークン → 削除実行・200"""
+        """有効なトークン → POST で削除実行・200"""
         import importlib
         import approver.index as approver
         importlib.reload(approver)
@@ -344,6 +344,7 @@ class TestApprover:
         with patch("approver.index._validate_token", return_value=(True, execution_input)), \
              patch("approver.index._invoke_deleter") as mock_deleter:
             event = {
+                "httpMethod": "POST",
                 "queryStringParameters": {
                     "token": "valid-token",
                     "arn": "arn:aws:s3:::test-bucket",
@@ -354,7 +355,7 @@ class TestApprover:
             mock_deleter.assert_called_once()
 
     def test_arn_mismatch_returns_400(self):
-        """ARNが一致しない → 400"""
+        """ARNが一致しない → 400（POST 経路）"""
         import importlib
         import approver.index as approver
         importlib.reload(approver)
@@ -362,6 +363,7 @@ class TestApprover:
         execution_input = {"arn": "arn:aws:s3:::different-bucket"}
         with patch("approver.index._validate_token", return_value=(True, execution_input)):
             event = {
+                "httpMethod": "POST",
                 "queryStringParameters": {
                     "token": "valid-token",
                     "arn": "arn:aws:s3:::test-bucket",  # 異なるARN
@@ -369,6 +371,41 @@ class TestApprover:
             }
             result = approver.lambda_handler(event, {})
             assert result["statusCode"] == 400
+
+    def test_get_shows_confirmation_page_no_invoke(self):
+        """GET = 確認ページのみ。deleter は invoke しない（無人クリック対策の回帰ガード）。
+        メールのリンクスキャナ/プリフェッチが GET で踏んでも削除が成立しないことを固定する。"""
+        import importlib
+        import approver.index as approver
+        importlib.reload(approver)
+
+        execution_input = {"arn": "arn:aws:s3:::test-bucket", "region": "ap-northeast-1"}
+        with patch("approver.index._validate_token", return_value=(True, execution_input)), \
+             patch("approver.index._invoke_deleter") as mock_deleter:
+            event = {
+                "httpMethod": "GET",
+                "queryStringParameters": {
+                    "token": "valid-token",
+                    "arn": "arn:aws:s3:::test-bucket",
+                }
+            }
+            result = approver.lambda_handler(event, {})
+            assert result["statusCode"] == 200
+            assert "text/html" in result["headers"]["Content-Type"]
+            assert "削除を承認する" in result["body"]   # 確認フォームのボタンが出る
+            mock_deleter.assert_not_called()             # ← 核心：GET では invoke されない
+
+    def test_unsupported_method_returns_405(self):
+        """GET/POST 以外は 405（既定で拒否）・invoke もしない。"""
+        import importlib
+        import approver.index as approver
+        importlib.reload(approver)
+
+        with patch("approver.index._invoke_deleter") as mock_deleter:
+            event = {"httpMethod": "PUT", "queryStringParameters": {"token": "t", "arn": "arn:aws:s3:::x"}}
+            result = approver.lambda_handler(event, {})
+            assert result["statusCode"] == 405
+            mock_deleter.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────
